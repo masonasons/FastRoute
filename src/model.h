@@ -93,6 +93,20 @@ const BlockType* FindBlockType(const std::wstring& id);
 // nothing else, so it can be checked without a graph or a sound card.
 std::vector<std::wstring> TrackNamesFor(const std::vector<Block>& blocks);
 
+// ---------------------------------------------------------------------------
+// Cut, copy and paste in the block list
+//
+// Both of these are the decisions behind the commands rather than the
+// commands, so they are here where they can be checked without a window.
+// ---------------------------------------------------------------------------
+
+// Where a paste lands: `above` puts the block before the selected one rather
+// than after it, and the two together reach everywhere a block can go -
+// above the first is the start of the list and below the last is the end, so
+// neither needs a setting of its own. A selection of -1, or one past the end,
+// means nothing is selected and the block goes on the end.
+size_t PasteIndexFor(size_t blockCount, int selected, bool above);
+
 // Which programs an application block captures, in the order they are listed.
 // The list where it has one and the single name otherwise, so that one answer
 // serves a session saved before a block could name several. Empty for a block
@@ -632,6 +646,16 @@ struct Session
     Hotkey hotkey;              // starts and stops this session from anywhere
     std::vector<Block> blocks;  // pipeline order, kinds may interleave freely
 };
+
+// Clears any of `b`'s hotkeys that something in `s` already answers to, and
+// returns how many were cleared.
+//
+// A block pasted with its keys intact into a session where another block
+// already has them would make a clash that nothing on screen explains. This
+// falls out right for both commands without either having to say which it is:
+// a cut block's original is gone by the time it is pasted, so it keeps its
+// keys, while a copied one meets itself and loses them.
+int ClearClashingHotkeys(const Session& s, Block& b);
 
 // ---------------------------------------------------------------------------
 // Application settings

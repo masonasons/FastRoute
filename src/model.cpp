@@ -612,6 +612,42 @@ std::wstring Block::ParamSummary() const
 
 // ---------------------------------------------------------------------------
 
+size_t PasteIndexFor(size_t blockCount, int selected, bool above)
+{
+    if (selected < 0 || (size_t)selected >= blockCount) return blockCount;
+    return above ? (size_t)selected : (size_t)selected + 1;
+}
+
+int ClearClashingHotkeys(const Session& s, Block& b)
+{
+    // A key is taken if any block in the session answers to it, whether as
+    // its own on-and-off key or as one of its action keys - the two share one
+    // keyboard, so a clash between them is still a clash.
+    auto taken = [&s](const Hotkey& h) {
+        if (!h.Set()) return false;
+        for (const Block& other : s.blocks)
+        {
+            if (other.hotkey.Set() && other.hotkey.mods == h.mods &&
+                other.hotkey.vk == h.vk)
+                return true;
+            for (int a = 0; a < BA_COUNT; ++a)
+                if (other.actionKey[a].Set() &&
+                    other.actionKey[a].mods == h.mods &&
+                    other.actionKey[a].vk == h.vk)
+                    return true;
+        }
+        return false;
+    };
+
+    int cleared = 0;
+    if (taken(b.hotkey)) { b.hotkey = Hotkey(); ++cleared; }
+    for (int a = 0; a < BA_COUNT; ++a)
+        if (taken(b.actionKey[a])) { b.actionKey[a] = Hotkey(); ++cleared; }
+    return cleared;
+}
+
+// ---------------------------------------------------------------------------
+
 static Hotkey ReadHotkey(const Json& owner)
 {
     Hotkey h;

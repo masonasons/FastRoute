@@ -7,6 +7,28 @@ static HACCEL g_sessionAccel = nullptr;
 static bool g_syncingChecks = false;   // ignore our own check-state updates
 
 // ---------------------------------------------------------------------------
+// The block clipboard
+//
+// A block of its own rather than the Windows clipboard, and deliberately. A
+// cut is destructive, so what comes back has to be exactly what went in - and
+// a block carries plugin parameter values, ten EQ bands and four hotkeys,
+// which a round trip through text could quietly lose a corner of. It is
+// process wide, so a block cut in one session window pastes into another.
+//
+// Sharing a block with someone else is what exporting a session is for.
+// ---------------------------------------------------------------------------
+static Block g_clip;
+static bool  g_clipHas = false;
+// What it is called, for the status line: the block itself may be renamed or
+// deleted after being copied, and saying "Microphone pasted" is the whole
+// feedback a screen reader user gets.
+static std::wstring ClipName()
+{
+    if (!g_clipHas) return std::wstring();
+    return g_clip.label.empty() ? g_clip.TypeName() : g_clip.label;
+}
+
+// ---------------------------------------------------------------------------
 
 HWND SessionWindowFor(int sessionId)
 {
@@ -591,6 +613,108 @@ static void CmdMoveBlock(HWND dlg, int delta)
     SelectBlock(dlg, j);
 }
 
+// Spoken, because there is nothing on screen that would say a block had been
+// copied. Written last so it is not overwritten by the session state line.
+static void SayInStatus(HWND dlg, const std::wstring& text)
+{
+    SetDlgItemTextW(dlg, IDC_SESSION_STATE, text.c_str());
+}
+
+static std::wstring NameOf(const Block& b)
+{
+    return b.label.empty() ? b.TypeName() : b.label;
+}
+
+// Ctrl+C, Ctrl+X and Ctrl+V are accelerators, so they are taken before any
+// control in the window sees them - including the times field, which is a
+// read-only edit precisely so that it can be read and copied from. So a
+// clipboard key only means a block when the block list has the focus; anywhere
+// else it is handed on as the ordinary editing command it looks like.
+//
+// Only for the key, not for the menu item beside it: choosing Copy from the
+// Block menu means the block whatever has the focus, while pressing Ctrl+C
+// means whatever the focus is on. WM_COMMAND tells them apart - an
+// accelerator sends 1 in the high word and a menu sends 0.
+//
+// Returns true when it has been dealt with elsewhere and there is nothing for
+// the block commands to do.
+static bool PassClipboardKeyOn(HWND dlg, WPARAM wp, UINT msg)
+{
+    if (HIWORD(wp) != 1) return false;              // the menu item
+    HWND focus = GetFocus();
+    if (focus == GetDlgItem(dlg, IDC_BLOCK_LIST)) return false;
+    if (focus && IsChild(dlg, focus)) SendMessageW(focus, msg, 0, 0);
+    return true;
+}
+
+static void CmdCopyBlock(HWND dlg, bool cut)
+{
+    int id = SessionIdOf(dlg);
+    Session* s = g_store.ById(id);
+    if (!s) return;
+
+    int i = SelectedBlock(dlg);
+    if (i < 0 || (size_t)i >= s->blocks.size())
+    {
+        SayInStatus(dlg, L"No block is selected.");
+        return;
+    }
+
+    g_clip = s->blocks[(size_t)i];
+    g_clipHas = true;
+    const std::wstring name = NameOf(g_clip);
+
+    if (!cut)
+    {
+        SayInStatus(dlg, FormatW(L"%s copied. Ctrl+V pastes it below the "
+                                 L"selected block, Ctrl+Shift+V above it.",
+                                 name.c_str()));
+        return;
+    }
+
+    s->blocks.erase(s->blocks.begin() + i);
+    CommitEdit(dlg, id);
+    SelectBlock(dlg, i);
+    SayInStatus(dlg, FormatW(L"%s cut. Ctrl+V pastes it below the selected "
+                             L"block, Ctrl+Shift+V above it.", name.c_str()));
+}
+
+static void CmdPasteBlock(HWND dlg, bool above)
+{
+    int id = SessionIdOf(dlg);
+    Session* s = g_store.ById(id);
+    if (!s) return;
+
+    if (!g_clipHas)
+    {
+        SayInStatus(dlg, L"Nothing has been copied. Select a block and press "
+                         L"Ctrl+C or Ctrl+X first.");
+        return;
+    }
+
+    Block b = g_clip;
+    const int cleared = ClearClashingHotkeys(*s, b);
+    const std::wstring name = NameOf(b);
+
+    // With nothing selected a paste goes on the end, which is where a block
+    // added from the library goes too.
+    const size_t at = PasteIndexFor(s->blocks.size(), SelectedBlock(dlg), above);
+
+    s->blocks.insert(s->blocks.begin() + at, b);
+    CommitEdit(dlg, id);
+    SetFocus(GetDlgItem(dlg, IDC_BLOCK_LIST));
+    SelectBlock(dlg, (int)at);
+
+    std::wstring said = FormatW(L"%s pasted at position %zu of %zu.",
+                                name.c_str(), at + 1, s->blocks.size());
+    if (cleared == 1)
+        said += L"  Its hotkey was cleared, because this session already uses it.";
+    else if (cleared > 1)
+        said += FormatW(L"  %d of its hotkeys were cleared, because this "
+                        L"session already uses them.", cleared);
+    SayInStatus(dlg, said);
+}
+
 static void CmdRun(HWND dlg)
 {
     int id = SessionIdOf(dlg);
@@ -678,6 +802,18 @@ static INT_PTR CALLBACK SessionDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_BLOCK_TOGGLE: CmdToggleBlock(dlg); return TRUE;
         case IDM_BLOCK_UP:     CmdMoveBlock(dlg, -1); return TRUE;
         case IDM_BLOCK_DOWN:   CmdMoveBlock(dlg, +1); return TRUE;
+        case IDM_BLOCK_CUT:
+            if (!PassClipboardKeyOn(dlg, wp, WM_CUT)) CmdCopyBlock(dlg, true);
+            return TRUE;
+        case IDM_BLOCK_COPY:
+            if (!PassClipboardKeyOn(dlg, wp, WM_COPY)) CmdCopyBlock(dlg, false);
+            return TRUE;
+        case IDM_BLOCK_PASTE:
+            if (!PassClipboardKeyOn(dlg, wp, WM_PASTE)) CmdPasteBlock(dlg, false);
+            return TRUE;
+        case IDM_BLOCK_PASTE_ABOVE:
+            if (!PassClipboardKeyOn(dlg, wp, WM_PASTE)) CmdPasteBlock(dlg, true);
+            return TRUE;
         case IDM_BLOCK_VOL_UP:   CmdNudgeVolume(dlg, +5); return TRUE;
         case IDM_BLOCK_VOL_DOWN: CmdNudgeVolume(dlg, -5); return TRUE;
         case IDM_BLOCK_HOTKEY: CmdBlockHotkey(dlg); return TRUE;
@@ -746,6 +882,12 @@ static INT_PTR CALLBACK SessionDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             enabled[IDM_BLOCK_DOWN]   = has && (size_t)(i + 1) < s->blocks.size();
             enabled[IDM_BLOCK_VOL_UP]   = has;
             enabled[IDM_BLOCK_VOL_DOWN] = has;
+            enabled[IDM_BLOCK_CUT]      = has;
+            enabled[IDM_BLOCK_COPY]     = has;
+            // Pasting needs something copied, but not a selection: with none
+            // it goes on the end.
+            enabled[IDM_BLOCK_PASTE]       = g_clipHas;
+            enabled[IDM_BLOCK_PASTE_ABOVE] = g_clipHas;
             enabled[IDM_BLOCK_HOTKEY]   = has;
             enabled[IDM_BLOCK_RENAME]   = has;
             // Most blocks have no actions, so the item is there but dead

@@ -1390,6 +1390,44 @@ Whatever the setting says, a WAV is always rotated before 4 GB. RIFF stores its
 sizes in 32 bits, so that is as large a file as the format can describe, and
 the alternative is one that silently stops being readable at the end.
 
+## Cut, copy and paste blocks
+
+In the block list: **Ctrl+X** cuts, **Ctrl+C** copies, **Ctrl+V** pastes below
+the selected block and **Ctrl+Shift+V** pastes above it. All four are on the
+Block menu and the list's context menu as well.
+
+Two paste commands rather than one with a setting, because two is already
+everything: pasting *above the first* block is the start of the list and
+pasting *below the last* is the end, so there is nowhere a block can go that
+these do not reach. With nothing selected a paste goes on the end, which is
+where a block added from the library goes too.
+
+The clipboard holds **the block**, not a description of it - the plugin it is,
+the parameter values it is set to, its EQ bands, its four action hotkeys, all
+of it. It is FastRoute's own rather than Windows', deliberately: a cut is
+destructive, so what comes back has to be exactly what went in, and a round
+trip through text could lose a corner of a block without saying so. Sharing a
+block with somebody else is what exporting a session is for.
+
+It is process-wide, so a block cut in one session window pastes into another.
+
+**Hotkeys are the one thing a paste can change.** A block pasted with its keys
+intact into a session where something else already answers to them would make
+a clash that nothing on screen explains, so those keys are cleared and the
+status line says how many. That one rule gives both commands the behaviour
+they should have without either knowing which it is: a cut block's original is
+gone by the time it is pasted, so it keeps its keys; a copied one meets itself
+and loses them. Moving a block to another session keeps its keys unless that
+session is already using them.
+
+Every one of the four says what it did in the status line - *Microphone copied*,
+*Microphone pasted at position 2 of 5* - because there is nothing else on
+screen that would say so.
+
+Ctrl+C in the times field still copies the text. The clipboard keys mean a
+block only when the block list has the focus; the menu items always mean the
+block, since that is what they say.
+
 ## Pipeline semantics
 
 The block list is walked top to bottom over a single bus:
@@ -1436,6 +1474,10 @@ it, so one session can feed two destinations with different content:
 | Delete         | Remove the focused block                            |
 | Ctrl+Up/Down   | Move the focused block up or down the pipeline      |
 | Alt+Up/Down    | Raise or lower the focused block's volume by 5%     |
+| Ctrl+X         | Cut the focused block                               |
+| Ctrl+C         | Copy the focused block                              |
+| Ctrl+V         | Paste below the focused block                       |
+| Ctrl+Shift+V   | Paste above the focused block                       |
 | Ctrl+R         | Run this session, or stop it                        |
 | Ctrl+H         | Hide to the notification area                       |
 | Ctrl+,         | Settings                                            |

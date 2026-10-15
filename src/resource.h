@@ -399,3 +399,7 @@
 #define IDM_BLOCK_RENAME        40033
 #define IDM_SESSION_OPENDIR     40034
 #define IDM_BLOCK_ACTIONS       40035
+#define IDM_BLOCK_CUT           40036
+#define IDM_BLOCK_COPY          40037
+#define IDM_BLOCK_PASTE         40038
+#define IDM_BLOCK_PASTE_ABOVE   40039
