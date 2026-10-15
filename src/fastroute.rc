@@ -57,6 +57,7 @@ BEGIN
     POPUP "&File"
     BEGIN
         MENUITEM "&New Session...\tCtrl+N",      IDM_SESSION_NEW
+        MENUITEM "&Import from a File...\tCtrl+I", IDM_SESSION_IMPORT
         MENUITEM SEPARATOR
         MENUITEM "&Hide to Tray\tCtrl+H",         IDM_APP_HIDE
         MENUITEM "&Settings...\tCtrl+Comma",      IDM_APP_SETTINGS
@@ -75,6 +76,8 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "Re&name...\tF2",               IDM_SESSION_RENAME
         MENUITEM "&Delete\tDel",                 IDM_SESSION_DELETE
+        MENUITEM SEPARATOR
+        MENUITEM "&Export to a File...\tCtrl+E", IDM_SESSION_EXPORT
     END
     POPUP "Sc&hedule"
     BEGIN
@@ -123,6 +126,7 @@ BEGIN
         MENUITEM "Hot&key...",                   IDM_SESSION_HOTKEY
         MENUITEM SEPARATOR
         MENUITEM "Open &Recording Folder\tCtrl+Shift+O", IDM_SESSION_OPENDIR
+        MENUITEM "&Export to a File...\tCtrl+E", IDM_SESSION_EXPORT
         MENUITEM SEPARATOR
         MENUITEM "&Hide to Tray\tCtrl+H",         IDM_APP_HIDE
         MENUITEM "Settin&gs...\tCtrl+Comma",      IDM_APP_SETTINGS
@@ -149,6 +153,9 @@ BEGIN
         MENUITEM "&New Session...\tCtrl+N",      IDM_SESSION_NEW
         MENUITEM "Re&name...\tF2",               IDM_SESSION_RENAME
         MENUITEM "&Delete\tDel",                 IDM_SESSION_DELETE
+        MENUITEM SEPARATOR
+        MENUITEM "&Export to a File...\tCtrl+E", IDM_SESSION_EXPORT
+        MENUITEM "&Import from a File...\tCtrl+I", IDM_SESSION_IMPORT
     END
 END
 
@@ -375,6 +382,8 @@ BEGIN
     VK_OEM_COMMA, IDM_APP_SETTINGS, VIRTKEY, CONTROL
     "O",        IDM_SESSION_OPENDIR, VIRTKEY, CONTROL, SHIFT
     VK_F2,      IDM_SESSION_RENAME, VIRTKEY
+    "E",        IDM_SESSION_EXPORT, VIRTKEY, CONTROL
+    "I",        IDM_SESSION_IMPORT, VIRTKEY, CONTROL
 END
 
 IDR_SESSION_MENU ACCELERATORS
@@ -392,6 +401,7 @@ BEGIN
     "H",        IDM_APP_HIDE,       VIRTKEY, CONTROL
     VK_OEM_COMMA, IDM_APP_SETTINGS, VIRTKEY, CONTROL
     "O",        IDM_SESSION_OPENDIR, VIRTKEY, CONTROL, SHIFT
+    "E",        IDM_SESSION_EXPORT, VIRTKEY, CONTROL
 END
 
 /////////////////////////////////////////////////////////////////////////////

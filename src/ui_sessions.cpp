@@ -1,6 +1,9 @@
 #include "app.h"
 #include "updater.h"
 #include <map>
+#include <shlobj.h>        // the file dialogs, for exporting and importing
+#include <shobjidl.h>
+#include <vector>
 
 static const UINT_PTR kSchedulerTimer = 1;
 static const UINT_PTR kRunningTimer = 2;
@@ -210,6 +213,199 @@ static void SaveStore(HWND owner)
 }
 
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Export and import one session
+//
+// A session as a file somebody can send to somebody else, which is what makes
+// "set this up for me" a thing one person can do for another. The file is the
+// same JSON a saved session is, so nothing here describes a block a second
+// time and nothing can fall behind the document format.
+//
+// The one thing that does not travel is which devices a session points at: an
+// endpoint id is a GUID made on the machine the device was plugged into. The
+// name is saved beside it, so an import looks for the name and adopts the id
+// it finds here - and says plainly which blocks it could not place.
+// ---------------------------------------------------------------------------
+
+static const wchar_t* kSessionExt = L"fastroute";
+
+// A file name that cannot fail to be created, out of a session name that can
+// hold anything the user typed.
+static std::wstring SafeFileName(const std::wstring& name)
+{
+    std::wstring out;
+    for (wchar_t c : name)
+    {
+        if (wcschr(L"\\/:*?\"<>|", c)) out += L'-';
+        else if (c >= L' ')            out += c;
+    }
+    while (!out.empty() && (out.back() == L'.' || out.back() == L' ')) out.pop_back();
+    return out.empty() ? std::wstring(L"session") : out;
+}
+
+// One file, through the same shell dialog the folder picker uses. `save`
+// chooses between the two; `path` is in and out.
+static bool PickSessionFile(HWND owner, bool save, std::wstring& path)
+{
+    IFileDialog* dlg = nullptr;
+    const CLSID which = save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog;
+    if (FAILED(CoCreateInstance(which, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dlg))) || !dlg)
+        return false;
+
+    const COMDLG_FILTERSPEC filters[] = {
+        { L"FastRoute session", L"*.fastroute" },
+        { L"All files", L"*.*" },
+    };
+    dlg->SetFileTypes(2, filters);
+    dlg->SetFileTypeIndex(1);
+    dlg->SetDefaultExtension(kSessionExt);
+    dlg->SetTitle(save ? L"Export the session to a file"
+                       : L"Import a session from a file");
+
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_FORCEFILESYSTEM |
+                    (save ? FOS_OVERWRITEPROMPT : FOS_FILEMUSTEXIST));
+
+    if (save && !path.empty()) dlg->SetFileName(path.c_str());
+
+    bool ok = false;
+    if (SUCCEEDED(dlg->Show(owner)))
+    {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dlg->GetResult(&item)) && item)
+        {
+            LPWSTR got = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &got)) && got)
+            {
+                path = got;
+                CoTaskMemFree(got);
+                ok = true;
+            }
+            item->Release();
+        }
+    }
+    dlg->Release();
+    return ok;
+}
+
+void ExportSession(HWND owner, const Session& s)
+{
+    std::wstring path = SafeFileName(s.name) + L"." + kSessionExt;
+    if (!PickSessionFile(owner, true, path)) return;
+
+    const std::wstring text = SessionToText(s);
+
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"wt, ccs=UTF-8") != 0 || !f)
+    {
+        ErrorBox(owner, L"That file could not be written: " + path);
+        return;
+    }
+    const bool wrote = fputws(text.c_str(), f) >= 0;
+    fclose(f);
+    if (!wrote)
+    {
+        ErrorBox(owner, L"That file could not be written: " + path);
+        return;
+    }
+
+    // Said rather than left silent: a dialog that closes with nothing on
+    // screen is a dialog you cannot tell worked.
+    MessageBoxW(owner,
+                FormatW(L"\"%s\" was exported to:\n\n%s\n\n"
+                        L"It holds %zu block%s. Anyone with FastRoute can "
+                        L"import it with Ctrl+I.",
+                        s.name.c_str(), path.c_str(), s.blocks.size(),
+                        s.blocks.size() == 1 ? L"" : L"s").c_str(),
+                L"FastRoute", MB_OK | MB_ICONINFORMATION);
+}
+
+// Every endpoint on this machine, both directions, as id and name. The one
+// place this needs a sound card, which is why RepointDevices takes the list
+// rather than going and getting it.
+static std::vector<std::pair<std::wstring, std::wstring>> EndpointsHere()
+{
+    std::vector<std::pair<std::wstring, std::wstring>> out;
+    for (bool render : { true, false })
+        for (const AudioEndpoint& e : EnumEndpoints(render))
+            out.push_back({ e.id, e.name });
+    return out;
+}
+
+int ImportSession(HWND owner)
+{
+    std::wstring path;
+    if (!PickSessionFile(owner, false, path)) return 0;
+
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"rt, ccs=UTF-8") != 0 || !f)
+    {
+        ErrorBox(owner, L"That file could not be read: " + path);
+        return 0;
+    }
+    std::wstring text;
+    wchar_t buf[4096];
+    while (fgetws(buf, 4096, f)) text += buf;
+    fclose(f);
+
+    Session s;
+    std::wstring err;
+    if (!SessionFromText(text, s, &err))
+    {
+        ErrorBox(owner, err);
+        return 0;
+    }
+
+    const ImportReport rep = RepointDevices(s, EndpointsHere());
+
+    // A name already in use is not refused: two sessions may legitimately be
+    // called the same thing, and renaming behind the user's back would be
+    // worse than a duplicate they can see and rename.
+    bool nameTaken = false;
+    for (const Session& other : g_store.sessions)
+        if (other.name == s.name) nameTaken = true;
+
+    s.id = g_store.NewId();
+    g_store.sessions.push_back(s);
+    g_store.SortSessions();
+    SaveStore(owner);
+    RefreshMainList();
+    SelectSessionById(GetDlgItem(g_mainDlg, IDC_SESSION_LIST), s.id);
+
+    // What happened, in full. The devices are the part worth reading: a
+    // session imported from another machine may be pointing at nothing.
+    std::wstring said = FormatW(L"\"%s\" was imported, with %zu block%s.",
+                                s.name.c_str(), s.blocks.size(),
+                                s.blocks.size() == 1 ? L"" : L"s");
+    if (rep.rematched == 1)
+        said += L"\n\nOne block's device was found again by name and re-pointed "
+                L"at this machine's copy of it.";
+    else if (rep.rematched > 1)
+        said += FormatW(L"\n\n%d blocks' devices were found again by name and "
+                        L"re-pointed at this machine's copies of them.",
+                        rep.rematched);
+    if (!rep.unmatched.empty())
+    {
+        said += FormatW(L"\n\n%zu block%s pointing at a device this machine "
+                        L"has not got, so %s need setting before the session "
+                        L"will run:",
+                        rep.unmatched.size(),
+                        rep.unmatched.size() == 1 ? L" is" : L"s are",
+                        rep.unmatched.size() == 1 ? L"it" : L"they");
+        for (const std::wstring& n : rep.unmatched) said += L"\n  " + n;
+    }
+    if (nameTaken)
+        said += L"\n\nAnother session is called that too. Press F2 to rename "
+                L"this one.";
+
+    MessageBoxW(owner, said.c_str(), L"FastRoute", MB_OK | MB_ICONINFORMATION);
+    OpenSessionWindow(s.id);
+    return s.id;
+}
+
 
 static void CmdNew(HWND dlg)
 {
@@ -499,6 +695,13 @@ INT_PTR CALLBACK MainDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_SESSION_OPENDIR: CmdOpenRecordFolder(dlg); return TRUE;
         case IDM_SESSION_RENAME:  CmdRename(dlg); return TRUE;
         case IDM_SESSION_DELETE:  CmdDelete(dlg); return TRUE;
+        case IDM_SESSION_IMPORT:  ImportSession(dlg); return TRUE;
+        case IDM_SESSION_EXPORT:
+        {
+            Session* s = SelectedSession();
+            if (s) ExportSession(dlg, *s);
+            return TRUE;
+        }
         case IDM_HELP_ERRORS:     ShowErrorLogDialog(dlg); return TRUE;
         // Asked for by hand, so it reports either way rather than only when
         // there is something to report.

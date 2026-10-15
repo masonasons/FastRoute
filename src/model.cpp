@@ -1016,6 +1016,545 @@ Session* SessionStore::ById(int id)
     return nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// One session, to and from JSON
+//
+// Lifted out of SessionStore::Load and ::Save, which had both inline, so
+// that exporting and importing one session is the same code the whole
+// document goes through rather than a second description of a session that
+// could fall behind it.
+// ---------------------------------------------------------------------------
+
+// False for an object that is not a session at all. A block of a type this
+// build does not know is skipped, as it always was.
+static bool ReadSession(const Json& js, Session& s)
+{
+    if (!js.IsObject()) return false;
+
+    s.id = js.AsInt(L"id", 0);
+    s.name = js.AsString(L"name");
+    s.autoRun = js.AsBool(L"autoRun", false);
+    s.hotkey = ReadHotkey(js);
+
+    const Json* blocks = js.Find(L"blocks");
+    if (blocks && blocks->IsArray())
+    {
+        for (const Json& jb : blocks->Items())
+        {
+            if (!jb.IsObject()) continue;
+            Block b;
+            b.typeId      = jb.AsString(L"type");
+            if (!FindBlockType(b.typeId)) continue;   // unknown block type
+            b.deviceId    = jb.AsString(L"deviceId");
+            b.deviceName  = jb.AsString(L"deviceName");
+            b.appSource   = jb.AsInt(L"appSource", AS_NAMED);
+            b.processName = jb.AsString(L"process");
+            b.appNames.clear();
+            if (const Json* names = jb.Find(L"appNames"))
+                if (names->IsArray())
+                    for (const Json& e : names->Items())
+                    {
+                        std::wstring n = e.AsText();
+                        if (!n.empty()) b.appNames.push_back(n);
+                    }
+            b.appWaitForStart = jb.AsBool(L"appWait", false);
+            b.url          = jb.AsString(L"url");
+            b.bufferMs     = jb.AsInt(L"bufferMs", 1000);
+            b.reconnect    = jb.AsBool(L"reconnect", true);
+            b.retrySeconds = jb.AsInt(L"retrySeconds", 5);
+            const Json* ex = jb.Find(L"excludeApps");
+            if (ex && ex->IsArray())
+                for (const Json& e : ex->Items())
+                {
+                    std::wstring name = e.AsText();
+                    if (!name.empty()) b.excludeApps.push_back(name);
+                }
+            b.volumePct   = jb.AsInt(L"volume", 100);
+            b.mixPct      = jb.AsInt(L"mix", 100);
+            b.suppressDb  = jb.AsInt(L"suppressDb", 20);
+            b.bassDb      = jb.AsInt(L"bassDb", 0);
+            b.trebleDb    = jb.AsInt(L"trebleDb", 0);
+            const Json* eq = jb.Find(L"eq");
+            if (eq && eq->IsArray())
+            {
+                const std::vector<Json>& bands = eq->Items();
+                for (int i = 0; i < kEqBands && (size_t)i < bands.size(); ++i)
+                    b.eqDb[i] = (int)bands[(size_t)i].AsNumber(0.0);
+            }
+            b.compThreshDb   = jb.AsInt(L"compThreshDb", -20);
+            b.compRatio      = jb.AsInt(L"compRatio", 4);
+            b.compAttackMs   = jb.AsInt(L"compAttackMs", 10);
+            b.compReleaseMs  = jb.AsInt(L"compReleaseMs", 100);
+            b.compMakeupDb   = jb.AsInt(L"compMakeupDb", 0);
+            b.compAutoMakeup = jb.AsBool(L"compAutoMakeup", true);
+            // Nothing written before this block existed has these, and
+            // zero is the setting where the block does nothing at all,
+            // which is the right thing for a session that never had one.
+            // Both net blocks, read together: they are two ends of
+            // one link and they store the same answers.
+            b.netProtocol   = jb.AsInt(L"netProtocol", NP_FASTROUTE);
+            b.netMode       = jb.AsInt(L"netMode", NM_MULTICAST);
+            b.netAddress    = jb.AsString(L"netAddress");
+            b.netPort       = jb.AsInt(L"netPort", 0);
+            b.netStreamName = jb.AsString(L"netStreamName");
+            b.netCodec      = jb.AsInt(L"netCodec", 0);
+            b.netPacketMs   = jb.AsInt(L"netPacketMs", 5);
+            b.netOpusKbps   = jb.AsInt(L"netOpusKbps", 128);
+            b.netOpusLossPct    = jb.AsInt(L"netOpusLossPct", 5);
+            b.netOpusComplexity = jb.AsInt(L"netOpusComplexity", 10);
+            b.netOpusSignal     = jb.AsInt(L"netOpusSignal", NOS_AUTO);
+            b.netOpusRateMode   = jb.AsInt(L"netOpusRateMode", NOR_VBR);
+            b.netOpusDtx        = jb.AsBool(L"netOpusDtx", false);
+            b.netTtl        = jb.AsInt(L"netTtl", 1);
+            b.netBufferMs   = jb.AsInt(L"netBufferMs", 60);
+            // AsNumberAt rather than AsInt: a stream id is a full 32 bit
+            // hash, and one above two billion read as an int comes back
+            // negative, which would lose the sender somebody chose.
+            b.netSourceId   = (unsigned int)jb.AsNumberAt(L"netSourceId", 0.0);
+            b.asioInLeft    = jb.AsInt(L"asioInLeft", 0);
+            b.asioInRight   = jb.AsInt(L"asioInRight", 1);
+            b.asioOutLeft   = jb.AsInt(L"asioOutLeft", 0);
+            b.asioOutRight  = jb.AsInt(L"asioOutRight", 1);
+            b.pitchSemitones = jb.AsInt(L"pitchSemitones", 0);
+            b.pitchCents     = jb.AsInt(L"pitchCents", 0);
+            b.pitchQuality   = jb.AsInt(L"pitchQuality", PQ_BEST);
+            b.limCeilingDb   = jb.AsInt(L"limCeilingDb", -1);
+            b.limReleaseMs   = jb.AsInt(L"limReleaseMs", 50);
+            b.limLookaheadMs = jb.AsInt(L"limLookaheadMs", 5);
+            b.gateThreshDb  = jb.AsInt(L"gateThreshDb", -40);
+            b.gateAttackMs  = jb.AsInt(L"gateAttackMs", 5);
+            b.gateHoldMs    = jb.AsInt(L"gateHoldMs", 200);
+            b.gateReleaseMs = jb.AsInt(L"gateReleaseMs", 150);
+            b.gateRangeDb   = jb.AsInt(L"gateRangeDb", 60);
+            // Nothing written before 0.3 has this, and those sessions were
+            // built and listened to with no lookahead and no latency here.
+            // A new gate block starts at the struct's own default instead,
+            // which is where the control is actually worth having.
+            b.gateLookaheadMs = jb.AsInt(L"gateLookaheadMs", 0);
+            b.normTargetDb    = jb.AsInt(L"normTargetDb", -3);
+            b.normLookaheadMs = jb.AsInt(L"normLookaheadMs", 50);
+            b.normMaxGainDb   = jb.AsInt(L"normMaxGainDb", 20);
+            b.normReleaseMs   = jb.AsInt(L"normReleaseMs", 1000);
+            b.clipThreshDb    = jb.AsInt(L"clipThreshDb", 0);
+            b.clipIntervalS   = jb.AsInt(L"clipIntervalS", 2);
+            b.bufSeconds      = jb.AsInt(L"bufSeconds", 60);
+            b.bufStepSec      = jb.AsInt(L"bufStepSec", 10);
+
+            const Json* acts = jb.Find(L"actions");
+            if (acts && acts->IsArray())
+                for (const Json& ae : acts->Items())
+                {
+                    if (!ae.IsObject()) continue;
+                    const int id = ae.AsInt(L"id", -1);
+                    if (id < 0 || id >= BA_COUNT) continue;
+                    Hotkey h;
+                    h.enabled = ae.AsBool(L"enabled", false);
+                    h.mods    = ae.AsInt(L"mods", 0);
+                    h.vk      = ae.AsInt(L"vk", 0);
+                    h.global  = ae.AsBool(L"global", true);
+                    b.actionKey[id] = h;
+                }
+            b.label         = jb.AsString(L"label");
+            b.plugFormat  = jb.AsInt(L"plugFormat", 0);
+            b.plugPath    = jb.AsString(L"plugPath");
+            b.plugUid     = jb.AsString(L"plugUid");
+            b.plugName    = jb.AsString(L"plugName");
+            const Json* pp = jb.Find(L"plugParams");
+            if (pp && pp->IsArray())
+                for (const Json& e : pp->Items())
+                {
+                    if (!e.IsObject()) continue;
+                    b.plugParams.push_back({
+                        (unsigned long long)e.AsNumberAt(L"id", 0.0),
+                        e.AsNumberAt(L"v", 0.0) });
+                }
+            const Json* para = jb.Find(L"para");
+            if (para && para->IsArray())
+            {
+                const std::vector<Json>& bands = para->Items();
+                for (int i = 0; i < kParaBands && (size_t)i < bands.size(); ++i)
+                {
+                    const Json& pb = bands[(size_t)i];
+                    if (!pb.IsObject()) continue;
+                    b.paraType[i]   = pb.AsInt(L"type", PT_PEAK);
+                    b.paraHz[i]     = pb.AsInt(L"hz", b.paraHz[i]);
+                    b.paraGainDb[i] = pb.AsInt(L"db", 0);
+                    b.paraQ[i]      = pb.AsInt(L"q", 10);
+                }
+            }
+            b.widthPct     = jb.AsInt(L"width", 100);
+            b.swapChannels = jb.AsBool(L"swapChannels", false);
+            b.centreCancel = jb.AsBool(L"centreCancel", false);
+            // Absent in anything written before 0.3, and the defaults are
+            // the identity, so those documents keep sounding as they did.
+            b.chanGainDb[0] = jb.AsInt(L"leftGainDb", 0);
+            b.chanGainDb[1] = jb.AsInt(L"rightGainDb", 0);
+            b.chanPan[0]    = jb.AsInt(L"leftPan", kChanPanMin);
+            b.chanPan[1]    = jb.AsInt(L"rightPan", kChanPanMax);
+            b.folder       = jb.AsString(L"folder");
+            b.nameTemplate = jb.AsString(L"nameTemplate");
+            b.recFormat    = jb.AsInt(L"format", 0);
+            // "mp3Kbps" is what older documents call it, from when MP3
+            // was the only format it applied to.
+            b.bitrateKbps  = jb.AsInt(L"kbps", jb.AsInt(L"mp3Kbps", 192));
+            b.skipSilence    = jb.AsBool(L"skipSilence", false);
+            b.silenceDb      = jb.AsInt(L"silenceDb", -50);
+            b.silenceHoldSec = jb.AsInt(L"silenceHold", 2);
+            b.splitMode      = jb.AsInt(L"splitMode", 0);
+            b.splitMinutes   = jb.AsInt(L"splitMinutes", 30);
+            b.splitMb        = jb.AsInt(L"splitMb", 100);
+            b.recMode        = jb.AsInt(L"recMode", RM_MIXED);
+            if (b.recMode < RM_MIXED || b.recMode > RM_BOTH)
+                b.recMode = RM_MIXED;
+            b.recRateHz      = jb.AsInt(L"recRate", 0);
+            b.recBits        = jb.AsInt(L"recBits", 0);
+            if (b.recRateHz < 0) b.recRateHz = 0;
+            if (b.recBits != 16 && b.recBits != 24 && b.recBits != 32)
+                b.recBits = 0;
+            b.enabled     = jb.AsBool(L"enabled", true);
+            b.hotkey      = ReadHotkey(jb);
+            s.blocks.push_back(b);
+        }
+    }
+    return true;
+}
+
+static Json WriteSession(const Session& s)
+{
+    Json js = Json::Obj();
+    js.Set(L"id", Json::Num(s.id));
+    js.Set(L"name", Json::Str(s.name));
+    js.Set(L"autoRun", Json::Bool(s.autoRun));
+    WriteHotkey(js, s.hotkey);
+
+    Json blocks = Json::Arr();
+    for (const Block& b : s.blocks)
+    {
+        Json jb = Json::Obj();
+        jb.Set(L"type", Json::Str(b.typeId));
+        if (b.typeId == BT_INPUT_APP)
+        {
+            jb.Set(L"appSource", Json::Num(b.appSource));
+            // Kept even for a foreground block: switching the mode back
+            // should find the application that was chosen before.
+            jb.Set(L"process", Json::Str(b.processName));
+            if (b.appNames.size() > 1)
+            {
+                Json names = Json::Arr();
+                for (const std::wstring& n : b.appNames)
+                    names.Push(Json::Str(n));
+                jb.Set(L"appNames", std::move(names));
+            }
+            if (b.appWaitForStart) jb.Set(L"appWait", Json::Bool(true));
+        }
+        if (b.typeId == BT_INPUT_STREAM)
+        {
+            jb.Set(L"url", Json::Str(b.url));
+            jb.Set(L"bufferMs", Json::Num(b.bufferMs));
+            jb.Set(L"reconnect", Json::Bool(b.reconnect));
+            jb.Set(L"retrySeconds", Json::Num(b.retrySeconds));
+        }
+        if (b.typeId == BT_INPUT_NET || b.typeId == BT_OUT_NET)
+        {
+            jb.Set(L"netProtocol", Json::Num(b.netProtocol));
+            jb.Set(L"netAddress", Json::Str(b.netAddress));
+            jb.Set(L"netPort", Json::Num(b.netPort));
+            jb.Set(L"netStreamName", Json::Str(b.netStreamName));
+        }
+        if (b.typeId == BT_INPUT_NET)
+        {
+            jb.Set(L"netBufferMs", Json::Num(b.netBufferMs));
+            jb.Set(L"netSourceId", Json::Num((double)b.netSourceId));
+        }
+        if (b.typeId == BT_OUT_NET)
+        {
+            jb.Set(L"netMode", Json::Num(b.netMode));
+            jb.Set(L"netCodec", Json::Num(b.netCodec));
+            jb.Set(L"netPacketMs", Json::Num(b.netPacketMs));
+            jb.Set(L"netOpusKbps", Json::Num(b.netOpusKbps));
+            jb.Set(L"netOpusLossPct", Json::Num(b.netOpusLossPct));
+            jb.Set(L"netOpusComplexity", Json::Num(b.netOpusComplexity));
+            jb.Set(L"netOpusSignal", Json::Num(b.netOpusSignal));
+            jb.Set(L"netOpusRateMode", Json::Num(b.netOpusRateMode));
+            jb.Set(L"netOpusDtx", Json::Bool(b.netOpusDtx));
+            jb.Set(L"netTtl", Json::Num(b.netTtl));
+        }
+        if (b.typeId == BT_INPUT_DEVICE || b.typeId == BT_OUTPUT_DEVICE ||
+            b.typeId == BT_INPUT_SYSTEM || b.typeId == BT_INPUT_ASIO ||
+            b.typeId == BT_OUT_ASIO)
+        {
+            jb.Set(L"deviceId", Json::Str(b.deviceId));
+            jb.Set(L"deviceName", Json::Str(b.deviceName));
+        }
+        if (b.typeId == BT_INPUT_ASIO)
+        {
+            jb.Set(L"asioInLeft", Json::Num(b.asioInLeft));
+            jb.Set(L"asioInRight", Json::Num(b.asioInRight));
+        }
+        if (b.typeId == BT_OUT_ASIO)
+        {
+            jb.Set(L"asioOutLeft", Json::Num(b.asioOutLeft));
+            jb.Set(L"asioOutRight", Json::Num(b.asioOutRight));
+        }
+        if (b.typeId == BT_INPUT_SYSTEM && !b.excludeApps.empty())
+        {
+            Json ex = Json::Arr();
+            for (const std::wstring& e : b.excludeApps) ex.Push(Json::Str(e));
+            jb.Set(L"excludeApps", std::move(ex));
+        }
+        if (b.typeId == BT_FX_SPEEX || b.typeId == BT_FX_RNNOISE)
+        {
+            jb.Set(L"mix", Json::Num(b.mixPct));
+            if (b.typeId == BT_FX_SPEEX) jb.Set(L"suppressDb", Json::Num(b.suppressDb));
+        }
+        if (b.typeId == BT_FX_TONE)
+        {
+            jb.Set(L"bassDb", Json::Num(b.bassDb));
+            jb.Set(L"trebleDb", Json::Num(b.trebleDb));
+        }
+        if (b.typeId == BT_FX_EQ10)
+        {
+            Json eq = Json::Arr();
+            for (int i = 0; i < kEqBands; ++i) eq.Push(Json::Num(b.eqDb[i]));
+            jb.Set(L"eq", std::move(eq));
+        }
+        if (b.typeId == BT_FX_PARA)
+        {
+            Json para = Json::Arr();
+            for (int i = 0; i < kParaBands; ++i)
+            {
+                Json pb = Json::Obj();
+                pb.Set(L"type", Json::Num(b.paraType[i]));
+                pb.Set(L"hz", Json::Num(b.paraHz[i]));
+                pb.Set(L"db", Json::Num(b.paraGainDb[i]));
+                pb.Set(L"q", Json::Num(b.paraQ[i]));
+                para.Push(std::move(pb));
+            }
+            jb.Set(L"para", std::move(para));
+        }
+        if (b.typeId == BT_FX_CHANNELS)
+        {
+            jb.Set(L"width", Json::Num(b.widthPct));
+            jb.Set(L"swapChannels", Json::Bool(b.swapChannels));
+            jb.Set(L"centreCancel", Json::Bool(b.centreCancel));
+            jb.Set(L"leftGainDb",  Json::Num(b.chanGainDb[0]));
+            jb.Set(L"rightGainDb", Json::Num(b.chanGainDb[1]));
+            jb.Set(L"leftPan",     Json::Num(b.chanPan[0]));
+            jb.Set(L"rightPan",    Json::Num(b.chanPan[1]));
+        }
+        if (b.typeId == BT_FX_COMP)
+        {
+            jb.Set(L"compThreshDb", Json::Num(b.compThreshDb));
+            jb.Set(L"compRatio", Json::Num(b.compRatio));
+            jb.Set(L"compAttackMs", Json::Num(b.compAttackMs));
+            jb.Set(L"compReleaseMs", Json::Num(b.compReleaseMs));
+            jb.Set(L"compAutoMakeup", Json::Bool(b.compAutoMakeup));
+            if (!b.compAutoMakeup) jb.Set(L"compMakeupDb", Json::Num(b.compMakeupDb));
+        }
+        if (b.typeId == BT_FX_GATE)
+        {
+            jb.Set(L"gateThreshDb", Json::Num(b.gateThreshDb));
+            jb.Set(L"gateAttackMs", Json::Num(b.gateAttackMs));
+            jb.Set(L"gateHoldMs", Json::Num(b.gateHoldMs));
+            jb.Set(L"gateReleaseMs", Json::Num(b.gateReleaseMs));
+            jb.Set(L"gateRangeDb", Json::Num(b.gateRangeDb));
+            jb.Set(L"gateLookaheadMs", Json::Num(b.gateLookaheadMs));
+        }
+        if (b.typeId == BT_FX_PITCH)
+        {
+            jb.Set(L"pitchSemitones", Json::Num(b.pitchSemitones));
+            jb.Set(L"pitchCents", Json::Num(b.pitchCents));
+            jb.Set(L"pitchQuality", Json::Num(b.pitchQuality));
+        }
+        if (b.typeId == BT_FX_LIMIT)
+        {
+            jb.Set(L"limCeilingDb", Json::Num(b.limCeilingDb));
+            jb.Set(L"limReleaseMs", Json::Num(b.limReleaseMs));
+            jb.Set(L"limLookaheadMs", Json::Num(b.limLookaheadMs));
+        }
+        if (b.typeId == BT_FX_NORM)
+        {
+            jb.Set(L"normTargetDb", Json::Num(b.normTargetDb));
+            jb.Set(L"normLookaheadMs", Json::Num(b.normLookaheadMs));
+            jb.Set(L"normMaxGainDb", Json::Num(b.normMaxGainDb));
+            jb.Set(L"normReleaseMs", Json::Num(b.normReleaseMs));
+        }
+        if (b.typeId == BT_FX_CLIPMON)
+        {
+            jb.Set(L"clipThreshDb", Json::Num(b.clipThreshDb));
+            jb.Set(L"clipIntervalS", Json::Num(b.clipIntervalS));
+        }
+        if (b.typeId == BT_FX_BUFFER)
+        {
+            jb.Set(L"bufSeconds", Json::Num(b.bufSeconds));
+            jb.Set(L"bufStepSec", Json::Num(b.bufStepSec));
+        }
+
+        // Only the keys that are actually set, so a block with no action
+        // hotkeys writes nothing rather than four empty objects.
+        {
+            Json acts = Json::Arr();
+            for (int a = 0; a < BA_COUNT; ++a)
+            {
+                if (!b.actionKey[a].Set()) continue;
+                Json ae = Json::Obj();
+                ae.Set(L"id", Json::Num(a));
+                ae.Set(L"enabled", Json::Bool(b.actionKey[a].enabled));
+                ae.Set(L"mods", Json::Num(b.actionKey[a].mods));
+                ae.Set(L"vk", Json::Num(b.actionKey[a].vk));
+                ae.Set(L"global", Json::Bool(b.actionKey[a].global));
+                acts.Push(std::move(ae));
+            }
+            if (!acts.Items().empty()) jb.Set(L"actions", std::move(acts));
+        }
+
+        if (b.typeId == BT_FX_PLUGIN)
+        {
+            jb.Set(L"plugFormat", Json::Num(b.plugFormat));
+            jb.Set(L"plugPath", Json::Str(b.plugPath));
+            jb.Set(L"plugUid", Json::Str(b.plugUid));
+            jb.Set(L"plugName", Json::Str(b.plugName));
+            Json ps = Json::Arr();
+            for (const auto& kv : b.plugParams)
+            {
+                Json one = Json::Obj();
+                one.Set(L"id", Json::Num((double)kv.first));
+                one.Set(L"v", Json::Num(kv.second));
+                ps.Push(std::move(one));
+            }
+            jb.Set(L"plugParams", std::move(ps));
+        }
+        if (b.typeId == BT_OUT_RECORDER)
+        {
+            jb.Set(L"folder", Json::Str(b.folder));
+            jb.Set(L"nameTemplate", Json::Str(b.nameTemplate));
+            jb.Set(L"format", Json::Num(b.recFormat));
+            if (RecFormatUsesBitrate((RecFormat)b.recFormat))
+                jb.Set(L"kbps", Json::Num(b.bitrateKbps));
+            jb.Set(L"skipSilence", Json::Bool(b.skipSilence));
+            if (b.skipSilence)
+            {
+                jb.Set(L"silenceDb", Json::Num(b.silenceDb));
+                jb.Set(L"silenceHold", Json::Num(b.silenceHoldSec));
+            }
+            jb.Set(L"splitMode", Json::Num(b.splitMode));
+            if (b.splitMode == 1) jb.Set(L"splitMinutes", Json::Num(b.splitMinutes));
+            if (b.splitMode == 2) jb.Set(L"splitMb", Json::Num(b.splitMb));
+            // Only when it is not the mix alone, so a document a older
+            // FastRoute reads is unchanged until the feature is used - and
+            // that older one then writes the mix, which is what it did.
+            if (b.recMode != RM_MIXED) jb.Set(L"recMode", Json::Num(b.recMode));
+            // Same again: absent means the session's rate and the format's
+            // own depth, which is what recording did before these existed.
+            if (b.recRateHz > 0) jb.Set(L"recRate", Json::Num(b.recRateHz));
+            if (b.recBits > 0) jb.Set(L"recBits", Json::Num(b.recBits));
+        }
+        if (!b.label.empty()) jb.Set(L"label", Json::Str(b.label));
+        jb.Set(L"volume", Json::Num(b.volumePct));
+        jb.Set(L"enabled", Json::Bool(b.enabled));
+        WriteHotkey(jb, b.hotkey);
+        blocks.Push(std::move(jb));
+    }
+    js.Set(L"blocks", std::move(blocks));
+    return js;
+}
+
+// The marker that says this is one of ours rather than any other JSON file.
+static const wchar_t* kExportKind = L"fastroute-session";
+
+std::wstring SessionToText(const Session& s)
+{
+    Json doc = Json::Obj();
+    doc.Set(L"kind", Json::Str(kExportKind));
+    doc.Set(L"version", Json::Num(1));
+    // The id is the store's, not the session's: two people's documents number
+    // their sessions independently, so carrying one over would only collide.
+    Session copy = s;
+    copy.id = 0;
+    doc.Set(L"session", WriteSession(copy));
+    return doc.Serialise();
+}
+
+bool SessionFromText(const std::wstring& text, Session& out, std::wstring* err)
+{
+    Json doc;
+    if (!Json::Parse(text, doc) || !doc.IsObject())
+    {
+        if (err) *err = L"That file is not a FastRoute session: it is not even "
+                        L"the right kind of file.";
+        return false;
+    }
+    if (doc.AsString(L"kind") != kExportKind)
+    {
+        if (err) *err = L"That file is not a FastRoute session. A session "
+                        L"exported by FastRoute says so in its first line.";
+        return false;
+    }
+    const Json* js = doc.Find(L"session");
+    if (!js || !ReadSession(*js, out))
+    {
+        if (err) *err = L"That file says it is a FastRoute session, but the "
+                        L"session in it could not be read.";
+        return false;
+    }
+    out.id = 0;                       // the store gives it one
+    if (out.name.empty()) out.name = L"Imported session";
+    // A session whose every block was of a type this build does not know
+    // would import as an empty one, which is worth saying rather than
+    // leaving someone to wonder where the blocks went.
+    if (out.blocks.empty())
+    {
+        if (err) *err = L"That session has no blocks this version of FastRoute "
+                        L"knows about. It may have been exported by a newer one.";
+        return false;
+    }
+    return true;
+}
+
+ImportReport RepointDevices(Session& s,
+                            const std::vector<std::pair<std::wstring,
+                                                        std::wstring>>& present)
+{
+    ImportReport r;
+    for (Block& b : s.blocks)
+    {
+        // Only the blocks that name a Windows endpoint. An ASIO block names a
+        // driver, which is a name already and needs no translating; a block
+        // with no device named is asking for the system default, which is
+        // what it will get here too.
+        if (b.typeId != BT_INPUT_DEVICE && b.typeId != BT_OUTPUT_DEVICE &&
+            b.typeId != BT_INPUT_SYSTEM)
+            continue;
+        if (b.deviceId.empty()) continue;
+
+        bool here = false;
+        for (const auto& d : present)
+            if (d.first == b.deviceId) { here = true; break; }
+        if (here) continue;             // the same machine, or the same device
+
+        // Not here under that id, so look for the name it was saved under.
+        // An endpoint id is a GUID of the machine it was made on; the name is
+        // the only thing that travels.
+        const std::wstring* found = nullptr;
+        for (const auto& d : present)
+            if (!b.deviceName.empty() && d.second == b.deviceName)
+            {
+                found = &d.first;
+                break;
+            }
+        if (found)
+        {
+            b.deviceId = *found;
+            ++r.rematched;
+            continue;
+        }
+        r.unmatched.push_back(b.deviceName.empty()
+                                  ? b.TypeName()
+                                  : b.deviceName);
+    }
+    return r;
+}
+
 void SessionStore::Load()
 {
     sessions.clear();
@@ -1091,195 +1630,8 @@ void SessionStore::Load()
 
     for (const Json& js : arr->Items())
     {
-        if (!js.IsObject()) continue;
-
         Session s;
-        s.id = js.AsInt(L"id", 0);
-        s.name = js.AsString(L"name");
-        s.autoRun = js.AsBool(L"autoRun", false);
-        s.hotkey = ReadHotkey(js);
-
-        const Json* blocks = js.Find(L"blocks");
-        if (blocks && blocks->IsArray())
-        {
-            for (const Json& jb : blocks->Items())
-            {
-                if (!jb.IsObject()) continue;
-                Block b;
-                b.typeId      = jb.AsString(L"type");
-                if (!FindBlockType(b.typeId)) continue;   // unknown block type
-                b.deviceId    = jb.AsString(L"deviceId");
-                b.deviceName  = jb.AsString(L"deviceName");
-                b.appSource   = jb.AsInt(L"appSource", AS_NAMED);
-                b.processName = jb.AsString(L"process");
-                b.appNames.clear();
-                if (const Json* names = jb.Find(L"appNames"))
-                    if (names->IsArray())
-                        for (const Json& e : names->Items())
-                        {
-                            std::wstring n = e.AsText();
-                            if (!n.empty()) b.appNames.push_back(n);
-                        }
-                b.appWaitForStart = jb.AsBool(L"appWait", false);
-                b.url          = jb.AsString(L"url");
-                b.bufferMs     = jb.AsInt(L"bufferMs", 1000);
-                b.reconnect    = jb.AsBool(L"reconnect", true);
-                b.retrySeconds = jb.AsInt(L"retrySeconds", 5);
-                const Json* ex = jb.Find(L"excludeApps");
-                if (ex && ex->IsArray())
-                    for (const Json& e : ex->Items())
-                    {
-                        std::wstring name = e.AsText();
-                        if (!name.empty()) b.excludeApps.push_back(name);
-                    }
-                b.volumePct   = jb.AsInt(L"volume", 100);
-                b.mixPct      = jb.AsInt(L"mix", 100);
-                b.suppressDb  = jb.AsInt(L"suppressDb", 20);
-                b.bassDb      = jb.AsInt(L"bassDb", 0);
-                b.trebleDb    = jb.AsInt(L"trebleDb", 0);
-                const Json* eq = jb.Find(L"eq");
-                if (eq && eq->IsArray())
-                {
-                    const std::vector<Json>& bands = eq->Items();
-                    for (int i = 0; i < kEqBands && (size_t)i < bands.size(); ++i)
-                        b.eqDb[i] = (int)bands[(size_t)i].AsNumber(0.0);
-                }
-                b.compThreshDb   = jb.AsInt(L"compThreshDb", -20);
-                b.compRatio      = jb.AsInt(L"compRatio", 4);
-                b.compAttackMs   = jb.AsInt(L"compAttackMs", 10);
-                b.compReleaseMs  = jb.AsInt(L"compReleaseMs", 100);
-                b.compMakeupDb   = jb.AsInt(L"compMakeupDb", 0);
-                b.compAutoMakeup = jb.AsBool(L"compAutoMakeup", true);
-                // Nothing written before this block existed has these, and
-                // zero is the setting where the block does nothing at all,
-                // which is the right thing for a session that never had one.
-                // Both net blocks, read together: they are two ends of
-                // one link and they store the same answers.
-                b.netProtocol   = jb.AsInt(L"netProtocol", NP_FASTROUTE);
-                b.netMode       = jb.AsInt(L"netMode", NM_MULTICAST);
-                b.netAddress    = jb.AsString(L"netAddress");
-                b.netPort       = jb.AsInt(L"netPort", 0);
-                b.netStreamName = jb.AsString(L"netStreamName");
-                b.netCodec      = jb.AsInt(L"netCodec", 0);
-                b.netPacketMs   = jb.AsInt(L"netPacketMs", 5);
-                b.netOpusKbps   = jb.AsInt(L"netOpusKbps", 128);
-                b.netOpusLossPct    = jb.AsInt(L"netOpusLossPct", 5);
-                b.netOpusComplexity = jb.AsInt(L"netOpusComplexity", 10);
-                b.netOpusSignal     = jb.AsInt(L"netOpusSignal", NOS_AUTO);
-                b.netOpusRateMode   = jb.AsInt(L"netOpusRateMode", NOR_VBR);
-                b.netOpusDtx        = jb.AsBool(L"netOpusDtx", false);
-                b.netTtl        = jb.AsInt(L"netTtl", 1);
-                b.netBufferMs   = jb.AsInt(L"netBufferMs", 60);
-                // AsNumberAt rather than AsInt: a stream id is a full 32 bit
-                // hash, and one above two billion read as an int comes back
-                // negative, which would lose the sender somebody chose.
-                b.netSourceId   = (unsigned int)jb.AsNumberAt(L"netSourceId", 0.0);
-                b.asioInLeft    = jb.AsInt(L"asioInLeft", 0);
-                b.asioInRight   = jb.AsInt(L"asioInRight", 1);
-                b.asioOutLeft   = jb.AsInt(L"asioOutLeft", 0);
-                b.asioOutRight  = jb.AsInt(L"asioOutRight", 1);
-                b.pitchSemitones = jb.AsInt(L"pitchSemitones", 0);
-                b.pitchCents     = jb.AsInt(L"pitchCents", 0);
-                b.pitchQuality   = jb.AsInt(L"pitchQuality", PQ_BEST);
-                b.limCeilingDb   = jb.AsInt(L"limCeilingDb", -1);
-                b.limReleaseMs   = jb.AsInt(L"limReleaseMs", 50);
-                b.limLookaheadMs = jb.AsInt(L"limLookaheadMs", 5);
-                b.gateThreshDb  = jb.AsInt(L"gateThreshDb", -40);
-                b.gateAttackMs  = jb.AsInt(L"gateAttackMs", 5);
-                b.gateHoldMs    = jb.AsInt(L"gateHoldMs", 200);
-                b.gateReleaseMs = jb.AsInt(L"gateReleaseMs", 150);
-                b.gateRangeDb   = jb.AsInt(L"gateRangeDb", 60);
-                // Nothing written before 0.3 has this, and those sessions were
-                // built and listened to with no lookahead and no latency here.
-                // A new gate block starts at the struct's own default instead,
-                // which is where the control is actually worth having.
-                b.gateLookaheadMs = jb.AsInt(L"gateLookaheadMs", 0);
-                b.normTargetDb    = jb.AsInt(L"normTargetDb", -3);
-                b.normLookaheadMs = jb.AsInt(L"normLookaheadMs", 50);
-                b.normMaxGainDb   = jb.AsInt(L"normMaxGainDb", 20);
-                b.normReleaseMs   = jb.AsInt(L"normReleaseMs", 1000);
-                b.clipThreshDb    = jb.AsInt(L"clipThreshDb", 0);
-                b.clipIntervalS   = jb.AsInt(L"clipIntervalS", 2);
-                b.bufSeconds      = jb.AsInt(L"bufSeconds", 60);
-                b.bufStepSec      = jb.AsInt(L"bufStepSec", 10);
-
-                const Json* acts = jb.Find(L"actions");
-                if (acts && acts->IsArray())
-                    for (const Json& ae : acts->Items())
-                    {
-                        if (!ae.IsObject()) continue;
-                        const int id = ae.AsInt(L"id", -1);
-                        if (id < 0 || id >= BA_COUNT) continue;
-                        Hotkey h;
-                        h.enabled = ae.AsBool(L"enabled", false);
-                        h.mods    = ae.AsInt(L"mods", 0);
-                        h.vk      = ae.AsInt(L"vk", 0);
-                        h.global  = ae.AsBool(L"global", true);
-                        b.actionKey[id] = h;
-                    }
-                b.label         = jb.AsString(L"label");
-                b.plugFormat  = jb.AsInt(L"plugFormat", 0);
-                b.plugPath    = jb.AsString(L"plugPath");
-                b.plugUid     = jb.AsString(L"plugUid");
-                b.plugName    = jb.AsString(L"plugName");
-                const Json* pp = jb.Find(L"plugParams");
-                if (pp && pp->IsArray())
-                    for (const Json& e : pp->Items())
-                    {
-                        if (!e.IsObject()) continue;
-                        b.plugParams.push_back({
-                            (unsigned long long)e.AsNumberAt(L"id", 0.0),
-                            e.AsNumberAt(L"v", 0.0) });
-                    }
-                const Json* para = jb.Find(L"para");
-                if (para && para->IsArray())
-                {
-                    const std::vector<Json>& bands = para->Items();
-                    for (int i = 0; i < kParaBands && (size_t)i < bands.size(); ++i)
-                    {
-                        const Json& pb = bands[(size_t)i];
-                        if (!pb.IsObject()) continue;
-                        b.paraType[i]   = pb.AsInt(L"type", PT_PEAK);
-                        b.paraHz[i]     = pb.AsInt(L"hz", b.paraHz[i]);
-                        b.paraGainDb[i] = pb.AsInt(L"db", 0);
-                        b.paraQ[i]      = pb.AsInt(L"q", 10);
-                    }
-                }
-                b.widthPct     = jb.AsInt(L"width", 100);
-                b.swapChannels = jb.AsBool(L"swapChannels", false);
-                b.centreCancel = jb.AsBool(L"centreCancel", false);
-                // Absent in anything written before 0.3, and the defaults are
-                // the identity, so those documents keep sounding as they did.
-                b.chanGainDb[0] = jb.AsInt(L"leftGainDb", 0);
-                b.chanGainDb[1] = jb.AsInt(L"rightGainDb", 0);
-                b.chanPan[0]    = jb.AsInt(L"leftPan", kChanPanMin);
-                b.chanPan[1]    = jb.AsInt(L"rightPan", kChanPanMax);
-                b.folder       = jb.AsString(L"folder");
-                b.nameTemplate = jb.AsString(L"nameTemplate");
-                b.recFormat    = jb.AsInt(L"format", 0);
-                // "mp3Kbps" is what older documents call it, from when MP3
-                // was the only format it applied to.
-                b.bitrateKbps  = jb.AsInt(L"kbps", jb.AsInt(L"mp3Kbps", 192));
-                b.skipSilence    = jb.AsBool(L"skipSilence", false);
-                b.silenceDb      = jb.AsInt(L"silenceDb", -50);
-                b.silenceHoldSec = jb.AsInt(L"silenceHold", 2);
-                b.splitMode      = jb.AsInt(L"splitMode", 0);
-                b.splitMinutes   = jb.AsInt(L"splitMinutes", 30);
-                b.splitMb        = jb.AsInt(L"splitMb", 100);
-                b.recMode        = jb.AsInt(L"recMode", RM_MIXED);
-                if (b.recMode < RM_MIXED || b.recMode > RM_BOTH)
-                    b.recMode = RM_MIXED;
-                b.recRateHz      = jb.AsInt(L"recRate", 0);
-                b.recBits        = jb.AsInt(L"recBits", 0);
-                if (b.recRateHz < 0) b.recRateHz = 0;
-                if (b.recBits != 16 && b.recBits != 24 && b.recBits != 32)
-                    b.recBits = 0;
-                b.enabled     = jb.AsBool(L"enabled", true);
-                b.hotkey      = ReadHotkey(jb);
-                s.blocks.push_back(b);
-            }
-        }
-        sessions.push_back(s);
+        if (ReadSession(js, s)) sessions.push_back(s);
     }
     SortSessions();
 
@@ -1379,245 +1731,7 @@ bool SessionStore::Save(std::wstring* err) const
     doc.Set(L"settings", std::move(set));
 
     Json arr = Json::Arr();
-    for (const Session& s : sessions)
-    {
-        Json js = Json::Obj();
-        js.Set(L"id", Json::Num(s.id));
-        js.Set(L"name", Json::Str(s.name));
-        js.Set(L"autoRun", Json::Bool(s.autoRun));
-        WriteHotkey(js, s.hotkey);
-
-        Json blocks = Json::Arr();
-        for (const Block& b : s.blocks)
-        {
-            Json jb = Json::Obj();
-            jb.Set(L"type", Json::Str(b.typeId));
-            if (b.typeId == BT_INPUT_APP)
-            {
-                jb.Set(L"appSource", Json::Num(b.appSource));
-                // Kept even for a foreground block: switching the mode back
-                // should find the application that was chosen before.
-                jb.Set(L"process", Json::Str(b.processName));
-                if (b.appNames.size() > 1)
-                {
-                    Json names = Json::Arr();
-                    for (const std::wstring& n : b.appNames)
-                        names.Push(Json::Str(n));
-                    jb.Set(L"appNames", std::move(names));
-                }
-                if (b.appWaitForStart) jb.Set(L"appWait", Json::Bool(true));
-            }
-            if (b.typeId == BT_INPUT_STREAM)
-            {
-                jb.Set(L"url", Json::Str(b.url));
-                jb.Set(L"bufferMs", Json::Num(b.bufferMs));
-                jb.Set(L"reconnect", Json::Bool(b.reconnect));
-                jb.Set(L"retrySeconds", Json::Num(b.retrySeconds));
-            }
-            if (b.typeId == BT_INPUT_NET || b.typeId == BT_OUT_NET)
-            {
-                jb.Set(L"netProtocol", Json::Num(b.netProtocol));
-                jb.Set(L"netAddress", Json::Str(b.netAddress));
-                jb.Set(L"netPort", Json::Num(b.netPort));
-                jb.Set(L"netStreamName", Json::Str(b.netStreamName));
-            }
-            if (b.typeId == BT_INPUT_NET)
-            {
-                jb.Set(L"netBufferMs", Json::Num(b.netBufferMs));
-                jb.Set(L"netSourceId", Json::Num((double)b.netSourceId));
-            }
-            if (b.typeId == BT_OUT_NET)
-            {
-                jb.Set(L"netMode", Json::Num(b.netMode));
-                jb.Set(L"netCodec", Json::Num(b.netCodec));
-                jb.Set(L"netPacketMs", Json::Num(b.netPacketMs));
-                jb.Set(L"netOpusKbps", Json::Num(b.netOpusKbps));
-                jb.Set(L"netOpusLossPct", Json::Num(b.netOpusLossPct));
-                jb.Set(L"netOpusComplexity", Json::Num(b.netOpusComplexity));
-                jb.Set(L"netOpusSignal", Json::Num(b.netOpusSignal));
-                jb.Set(L"netOpusRateMode", Json::Num(b.netOpusRateMode));
-                jb.Set(L"netOpusDtx", Json::Bool(b.netOpusDtx));
-                jb.Set(L"netTtl", Json::Num(b.netTtl));
-            }
-            if (b.typeId == BT_INPUT_DEVICE || b.typeId == BT_OUTPUT_DEVICE ||
-                b.typeId == BT_INPUT_SYSTEM || b.typeId == BT_INPUT_ASIO ||
-                b.typeId == BT_OUT_ASIO)
-            {
-                jb.Set(L"deviceId", Json::Str(b.deviceId));
-                jb.Set(L"deviceName", Json::Str(b.deviceName));
-            }
-            if (b.typeId == BT_INPUT_ASIO)
-            {
-                jb.Set(L"asioInLeft", Json::Num(b.asioInLeft));
-                jb.Set(L"asioInRight", Json::Num(b.asioInRight));
-            }
-            if (b.typeId == BT_OUT_ASIO)
-            {
-                jb.Set(L"asioOutLeft", Json::Num(b.asioOutLeft));
-                jb.Set(L"asioOutRight", Json::Num(b.asioOutRight));
-            }
-            if (b.typeId == BT_INPUT_SYSTEM && !b.excludeApps.empty())
-            {
-                Json ex = Json::Arr();
-                for (const std::wstring& e : b.excludeApps) ex.Push(Json::Str(e));
-                jb.Set(L"excludeApps", std::move(ex));
-            }
-            if (b.typeId == BT_FX_SPEEX || b.typeId == BT_FX_RNNOISE)
-            {
-                jb.Set(L"mix", Json::Num(b.mixPct));
-                if (b.typeId == BT_FX_SPEEX) jb.Set(L"suppressDb", Json::Num(b.suppressDb));
-            }
-            if (b.typeId == BT_FX_TONE)
-            {
-                jb.Set(L"bassDb", Json::Num(b.bassDb));
-                jb.Set(L"trebleDb", Json::Num(b.trebleDb));
-            }
-            if (b.typeId == BT_FX_EQ10)
-            {
-                Json eq = Json::Arr();
-                for (int i = 0; i < kEqBands; ++i) eq.Push(Json::Num(b.eqDb[i]));
-                jb.Set(L"eq", std::move(eq));
-            }
-            if (b.typeId == BT_FX_PARA)
-            {
-                Json para = Json::Arr();
-                for (int i = 0; i < kParaBands; ++i)
-                {
-                    Json pb = Json::Obj();
-                    pb.Set(L"type", Json::Num(b.paraType[i]));
-                    pb.Set(L"hz", Json::Num(b.paraHz[i]));
-                    pb.Set(L"db", Json::Num(b.paraGainDb[i]));
-                    pb.Set(L"q", Json::Num(b.paraQ[i]));
-                    para.Push(std::move(pb));
-                }
-                jb.Set(L"para", std::move(para));
-            }
-            if (b.typeId == BT_FX_CHANNELS)
-            {
-                jb.Set(L"width", Json::Num(b.widthPct));
-                jb.Set(L"swapChannels", Json::Bool(b.swapChannels));
-                jb.Set(L"centreCancel", Json::Bool(b.centreCancel));
-                jb.Set(L"leftGainDb",  Json::Num(b.chanGainDb[0]));
-                jb.Set(L"rightGainDb", Json::Num(b.chanGainDb[1]));
-                jb.Set(L"leftPan",     Json::Num(b.chanPan[0]));
-                jb.Set(L"rightPan",    Json::Num(b.chanPan[1]));
-            }
-            if (b.typeId == BT_FX_COMP)
-            {
-                jb.Set(L"compThreshDb", Json::Num(b.compThreshDb));
-                jb.Set(L"compRatio", Json::Num(b.compRatio));
-                jb.Set(L"compAttackMs", Json::Num(b.compAttackMs));
-                jb.Set(L"compReleaseMs", Json::Num(b.compReleaseMs));
-                jb.Set(L"compAutoMakeup", Json::Bool(b.compAutoMakeup));
-                if (!b.compAutoMakeup) jb.Set(L"compMakeupDb", Json::Num(b.compMakeupDb));
-            }
-            if (b.typeId == BT_FX_GATE)
-            {
-                jb.Set(L"gateThreshDb", Json::Num(b.gateThreshDb));
-                jb.Set(L"gateAttackMs", Json::Num(b.gateAttackMs));
-                jb.Set(L"gateHoldMs", Json::Num(b.gateHoldMs));
-                jb.Set(L"gateReleaseMs", Json::Num(b.gateReleaseMs));
-                jb.Set(L"gateRangeDb", Json::Num(b.gateRangeDb));
-                jb.Set(L"gateLookaheadMs", Json::Num(b.gateLookaheadMs));
-            }
-            if (b.typeId == BT_FX_PITCH)
-            {
-                jb.Set(L"pitchSemitones", Json::Num(b.pitchSemitones));
-                jb.Set(L"pitchCents", Json::Num(b.pitchCents));
-                jb.Set(L"pitchQuality", Json::Num(b.pitchQuality));
-            }
-            if (b.typeId == BT_FX_LIMIT)
-            {
-                jb.Set(L"limCeilingDb", Json::Num(b.limCeilingDb));
-                jb.Set(L"limReleaseMs", Json::Num(b.limReleaseMs));
-                jb.Set(L"limLookaheadMs", Json::Num(b.limLookaheadMs));
-            }
-            if (b.typeId == BT_FX_NORM)
-            {
-                jb.Set(L"normTargetDb", Json::Num(b.normTargetDb));
-                jb.Set(L"normLookaheadMs", Json::Num(b.normLookaheadMs));
-                jb.Set(L"normMaxGainDb", Json::Num(b.normMaxGainDb));
-                jb.Set(L"normReleaseMs", Json::Num(b.normReleaseMs));
-            }
-            if (b.typeId == BT_FX_CLIPMON)
-            {
-                jb.Set(L"clipThreshDb", Json::Num(b.clipThreshDb));
-                jb.Set(L"clipIntervalS", Json::Num(b.clipIntervalS));
-            }
-            if (b.typeId == BT_FX_BUFFER)
-            {
-                jb.Set(L"bufSeconds", Json::Num(b.bufSeconds));
-                jb.Set(L"bufStepSec", Json::Num(b.bufStepSec));
-            }
-
-            // Only the keys that are actually set, so a block with no action
-            // hotkeys writes nothing rather than four empty objects.
-            {
-                Json acts = Json::Arr();
-                for (int a = 0; a < BA_COUNT; ++a)
-                {
-                    if (!b.actionKey[a].Set()) continue;
-                    Json ae = Json::Obj();
-                    ae.Set(L"id", Json::Num(a));
-                    ae.Set(L"enabled", Json::Bool(b.actionKey[a].enabled));
-                    ae.Set(L"mods", Json::Num(b.actionKey[a].mods));
-                    ae.Set(L"vk", Json::Num(b.actionKey[a].vk));
-                    ae.Set(L"global", Json::Bool(b.actionKey[a].global));
-                    acts.Push(std::move(ae));
-                }
-                if (!acts.Items().empty()) jb.Set(L"actions", std::move(acts));
-            }
-
-            if (b.typeId == BT_FX_PLUGIN)
-            {
-                jb.Set(L"plugFormat", Json::Num(b.plugFormat));
-                jb.Set(L"plugPath", Json::Str(b.plugPath));
-                jb.Set(L"plugUid", Json::Str(b.plugUid));
-                jb.Set(L"plugName", Json::Str(b.plugName));
-                Json ps = Json::Arr();
-                for (const auto& kv : b.plugParams)
-                {
-                    Json one = Json::Obj();
-                    one.Set(L"id", Json::Num((double)kv.first));
-                    one.Set(L"v", Json::Num(kv.second));
-                    ps.Push(std::move(one));
-                }
-                jb.Set(L"plugParams", std::move(ps));
-            }
-            if (b.typeId == BT_OUT_RECORDER)
-            {
-                jb.Set(L"folder", Json::Str(b.folder));
-                jb.Set(L"nameTemplate", Json::Str(b.nameTemplate));
-                jb.Set(L"format", Json::Num(b.recFormat));
-                if (RecFormatUsesBitrate((RecFormat)b.recFormat))
-                    jb.Set(L"kbps", Json::Num(b.bitrateKbps));
-                jb.Set(L"skipSilence", Json::Bool(b.skipSilence));
-                if (b.skipSilence)
-                {
-                    jb.Set(L"silenceDb", Json::Num(b.silenceDb));
-                    jb.Set(L"silenceHold", Json::Num(b.silenceHoldSec));
-                }
-                jb.Set(L"splitMode", Json::Num(b.splitMode));
-                if (b.splitMode == 1) jb.Set(L"splitMinutes", Json::Num(b.splitMinutes));
-                if (b.splitMode == 2) jb.Set(L"splitMb", Json::Num(b.splitMb));
-                // Only when it is not the mix alone, so a document a older
-                // FastRoute reads is unchanged until the feature is used - and
-                // that older one then writes the mix, which is what it did.
-                if (b.recMode != RM_MIXED) jb.Set(L"recMode", Json::Num(b.recMode));
-                // Same again: absent means the session's rate and the format's
-                // own depth, which is what recording did before these existed.
-                if (b.recRateHz > 0) jb.Set(L"recRate", Json::Num(b.recRateHz));
-                if (b.recBits > 0) jb.Set(L"recBits", Json::Num(b.recBits));
-            }
-            if (!b.label.empty()) jb.Set(L"label", Json::Str(b.label));
-            jb.Set(L"volume", Json::Num(b.volumePct));
-            jb.Set(L"enabled", Json::Bool(b.enabled));
-            WriteHotkey(jb, b.hotkey);
-            blocks.Push(std::move(jb));
-        }
-        js.Set(L"blocks", std::move(blocks));
-        arr.Push(std::move(js));
-    }
+    for (const Session& s : sessions) arr.Push(WriteSession(s));
     doc.Set(L"sessions", std::move(arr));
 
     Json evs = Json::Arr();

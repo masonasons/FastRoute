@@ -126,6 +126,12 @@ void OpenRecordFolder(HWND owner, int sessionId, int preferBlock);
 // when the dialog was cancelled.
 bool EditBlockActions(HWND parent, Block& b);
 bool EditScheduleEvent(HWND parent, ScheduleEvent& e);
+
+// Export and import one session as a file of its own. Both ask for the file
+// and report what happened; export takes the session to write, and import
+// adds whatever it read to the store and returns its id, or 0.
+void ExportSession(HWND owner, const Session& s);
+int  ImportSession(HWND owner);
 void ShowAboutDialog(HWND parent);
 void ShowErrorLogDialog(HWND parent);
 void ShowSettingsDialog(HWND parent);

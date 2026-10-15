@@ -824,6 +824,14 @@ static INT_PTR CALLBACK SessionDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_SESS_STOP:    StopSession(SessionIdOf(dlg)); return TRUE;
         case IDM_SESS_TOGGLE:  CmdToggle(dlg);      return TRUE;
         case IDM_SESSION_AUTORUN: CmdAutoRun(dlg);   return TRUE;
+        case IDM_SESSION_EXPORT:
+        {
+            // The session this window is showing, not whatever the main
+            // window happens to have selected.
+            Session* s = g_store.ById(SessionIdOf(dlg));
+            if (s) ExportSession(dlg, *s);
+            return TRUE;
+        }
         case IDM_SESSION_OPENDIR:
             // The selected block, so that a session with several recorders
             // opens the one being looked at rather than always the first.

@@ -1390,6 +1390,56 @@ Whatever the setting says, a WAV is always rotated before 4 GB. RIFF stores its
 sizes in 32 bits, so that is as large a file as the format can describe, and
 the alternative is one that silently stops being readable at the end.
 
+## Exporting and importing a session
+
+**Ctrl+E** writes the selected session to a `.fastroute` file; **Ctrl+I** reads
+one back in as a new session. Both are on the menus - Export under Session,
+Import under File - and Export is in the session window too, where it exports
+the session that window is showing.
+
+The file is the same JSON a saved session is, read and written by the same
+code the whole document goes through, so an exported session cannot describe a
+block differently from the way your `sessions.json` does. It carries
+everything: the blocks and their order, every parameter, the plugin a plugin
+block is and the values it is set to, the recorder's folder and format, the
+hotkeys.
+
+It does not carry the session's **id**, which belongs to the document it came
+out of rather than to the session - two people's documents number their
+sessions independently, so bringing one along would only collide.
+
+### Devices, which are the part that does not travel
+
+A Windows endpoint id is a GUID made on the machine the device was plugged
+into. Your friend's microphone is not your microphone, however identical the
+hardware. So an import does this, per device block:
+
+1. If the saved id is present on this machine, nothing happens - that is the
+   same device, and importing onto the machine you exported from changes
+   nothing at all.
+2. Otherwise the **name** saved beside the id is looked for among this
+   machine's endpoints, and where one matches, the block is re-pointed at it.
+   This is what makes `Microphone (USB Audio)` work on both machines.
+3. Otherwise the block is **left pointing where it was** and named in the
+   import report, so you know which blocks to go and set.
+
+A block that is not pointing at a Windows endpoint is left alone: an ASIO
+block names a driver, which is already a name; an application block names
+programs; a net block names an address. A block set to the system default has
+no id to translate and gets this machine's default, which is what it asked
+for.
+
+The import says what it did - how many blocks it re-pointed, which it could
+not, and whether another session is already called the same thing - because
+an import that quietly leaves three blocks pointing at nothing is an import
+you find out about when the session refuses to run.
+
+A file that is not one of these is refused and told so in a sentence, which
+matters because picking the wrong file is the first thing anyone does. A
+session whose blocks are all of types this build has never heard of is
+refused too, rather than imported as an empty session: it was probably
+exported by a newer FastRoute.
+
 ## Cut, copy and paste blocks
 
 In the block list: **Ctrl+X** cuts, **Ctrl+C** copies, **Ctrl+V** pastes below
@@ -1455,6 +1505,8 @@ it, so one session can feed two destinations with different content:
 | Enter          | Open the focused session                  |
 | Ctrl+R         | Run the focused session, or stop it       |
 | Ctrl+N         | New session                               |
+| Ctrl+E         | Export the focused session to a file      |
+| Ctrl+I         | Import a session from a file              |
 | Ctrl+H         | Hide to the notification area             |
 | Ctrl+,         | Settings                                  |
 | Ctrl+Shift+N   | New scheduled event                       |
@@ -1482,6 +1534,7 @@ it, so one session can feed two destinations with different content:
 | Ctrl+H         | Hide to the notification area                       |
 | Ctrl+,         | Settings                                            |
 | Ctrl+Shift+O   | Open the recording folder                           |
+| Ctrl+E         | Export this session to a file                       |
 | Esc            | Close the session window                            |
 | Shift+F10      | Context menu, including Hotkey                      |
 

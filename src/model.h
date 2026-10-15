@@ -658,6 +658,45 @@ struct Session
 int ClearClashingHotkeys(const Session& s, Block& b);
 
 // ---------------------------------------------------------------------------
+// One session as a file of its own, for Export and Import
+//
+// The same reading and writing the whole document goes through, so an
+// exported session cannot describe a block differently from the way a saved
+// one does. Text rather than Json in the interface, because the only thing
+// the window needs to do with it is write it to a file and read it back.
+// ---------------------------------------------------------------------------
+
+// The session as a document. Carries its own name but not its id, which
+// belongs to the store it came out of and not to the session.
+std::wstring SessionToText(const Session& s);
+
+// Reads one back. False, with `err` said plainly, for a file that is not one
+// of these - which is what someone will try first, having picked the wrong
+// file. The session comes back with no id; the store gives it one.
+bool SessionFromText(const std::wstring& text, Session& out, std::wstring* err);
+
+// What a session needs on this machine that it may not have. An exported
+// session carries the endpoint ids of the machine it came from, and those
+// mean nothing here - so a device is looked for by the name that was saved
+// beside the id, and adopted where one matches.
+//
+// Returns how many blocks were re-pointed in `rematched`, and names the ones
+// still needing attention. The names are for telling the user; nothing else
+// is done about them, because a block with no device is a block to go and
+// set, not an error to refuse the import over.
+struct ImportReport
+{
+    int rematched = 0;                      // found again by name
+    std::vector<std::wstring> unmatched;    // "Microphone (USB Audio)"
+};
+// `present` is every endpoint id and name on this machine, render and capture
+// together, as pairs. Passed in rather than enumerated here so that this
+// stays something that can be checked without a sound card.
+ImportReport RepointDevices(Session& s,
+                            const std::vector<std::pair<std::wstring,
+                                                        std::wstring>>& present);
+
+// ---------------------------------------------------------------------------
 // Application settings
 // ---------------------------------------------------------------------------
 
