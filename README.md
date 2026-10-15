@@ -1200,7 +1200,9 @@ hardware.
 
 A recorder block can be set to a rate and bit depth of its own, independent of
 whatever the session is running at - see **Rate and bit depth** under
-Recording.
+Recording. That is the only place in FastRoute where either is a choice, and
+it is a choice about the file rather than about the session: the graph keeps
+running at the master output's rate whatever a recorder is set to.
 
 ## Recording
 
@@ -1214,6 +1216,8 @@ cleaned signal from the same session.
   MP3 and AAC by the encoders Windows ships, so those depend on the release.
   A format this machine cannot encode is left out of the list rather than
   offered and then refused. The bitrate applies to the four lossy formats.
+* **Sample rate and bit depth** can be set per block, or left to follow the
+  session and the format - see **Rate and bit depth** below.
 * **File name templates** expand `{session}`, `{block}`, `{date}`, `{time}`,
   `{datetime}` and `{n}`, and the extension is added automatically. `{block}`
   is empty for a recorder's own mixed file, there being no one block it is of;
@@ -1295,6 +1299,47 @@ recorder.
 With two Recorder blocks both asking for tracks, an input block's file belongs
 to the **first** of them below it. One input cannot be written to two track
 files at once, so the second recorder gets its mixed file and nothing else.
+
+### Rate and bit depth
+
+A recorder block writes at the session's own rate and 16 bits unless you say
+otherwise, which is what it always did. **Sample rate** and **Bit depth** on
+the block's parameters change that for that one file.
+
+Both lists hold only what the chosen format can actually be written as here,
+because that is not the same everywhere and not the same for each format:
+
+* **WAV** takes any rate, and 16 bit, 24 bit or 32 bit float. At 32 bit the
+  samples go to disk exactly as the mix holds them, with no conversion of any
+  kind.
+* **FLAC** is 16 or 24 bit, at 44100 and up - Windows' encoder has nothing
+  below 44100, which is the reason this setting exists as much as any
+  preference: a session running at 32 kHz could not record FLAC at all before,
+  and now it records at 48.
+* **MP3** goes up to 48000 and no further, and has no bit depth.
+* **AAC** is 16 bit, up to 48000, and also offers 96000.
+* **Ogg Vorbis** is fussier than the rate alone, and libvorbis is asked rather
+  than assumed: it refuses 192 kbps at 22050 Hz, and refuses every bitrate
+  above 48000. So the rates offered stop at 48000, and **the bitrate list
+  shortens as the rate comes down**.
+* **Opus** is a 48 kHz format. It resamples anything it is handed, so there is
+  nothing for the setting to decide and the control is switched off rather
+  than left there doing nothing.
+
+A combination the encoder has nothing for is refused with the rates it does
+have named, rather than quietly written as something else.
+
+The conversion happens on the recorder's own writer thread, not on the audio
+clock, so recording at a rate of its own costs the session no latency and
+cannot cause a dropout. It asks the resampler for its best quality for the
+same reason: nothing is waiting on it but the file.
+
+A Buffer block's Save asks the same questions with the same controls, because
+it is the same question.
+
+**Tracks inherit it.** A recorder writing a file per input block writes every
+one of them at the rate and depth the recorder is set to, so they still line
+up with each other and with the mixed file.
 
 ### Skipping silence
 

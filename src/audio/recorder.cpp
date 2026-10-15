@@ -1,4 +1,5 @@
 #include "audio.h"
+#include "resample.h"
 #include "util.h"
 
 #include <shlwapi.h>
@@ -160,6 +161,18 @@ public:
     std::wstring Path() const override { return m_path; }
 
 protected:
+    // Called by each subclass's Start once it knows what it has settled on -
+    // which need not be what was asked for, since a format can refuse. After
+    // this, m_rate is the rate going into the file and Encode is called at it.
+    void SetFormat(int inRate, int fileRate, int bits)
+    {
+        m_rate = fileRate > 0 ? fileRate : inRate;
+        m_bits = bits;
+        // Quality 10 rather than the live default: this runs on the writer
+        // thread, where the only thing waiting on it is the file.
+        m_conv.Prepare(inRate > 0 ? inRate : m_rate, m_rate, 10);
+    }
+
     void RunWriter()
     {
         m_running = true;
@@ -174,7 +187,20 @@ protected:
                     chunk.assign(m_queue.begin(), m_queue.end());
                     m_queue.clear();
                 }
-                if (!chunk.empty()) Encode(chunk.data(), chunk.size() / kChannels);
+                if (chunk.empty()) continue;
+
+                // Recording at a rate of its own is converted here rather
+                // than anywhere nearer the audio clock. Latched off entirely
+                // when the two rates agree, which is the ordinary case.
+                if (!m_conv.Engaged())
+                {
+                    Encode(chunk.data(), chunk.size() / kChannels);
+                    continue;
+                }
+                m_converted.clear();
+                m_conv.Run(chunk.data(), chunk.size() / kChannels, m_converted);
+                if (!m_converted.empty())
+                    Encode(m_converted.data(), m_converted.size() / kChannels);
             }
         });
     }
@@ -192,13 +218,36 @@ protected:
         }
     }
 
+    // The same at 24 bit, three bytes per sample, little endian - which is a
+    // byte stream rather than any integer type, so it is built as one.
+    static void ToPcm24(const float* src, size_t frames,
+                        std::vector<unsigned char>& dst)
+    {
+        dst.resize(frames * kChannels * 3);
+        unsigned char* p = dst.data();
+        for (size_t i = 0; i < frames * kChannels; ++i)
+        {
+            float v = src[i];
+            if (v > 1.0f) v = 1.0f;
+            else if (v < -1.0f) v = -1.0f;
+            const long q = lrintf(v * 8388607.0f);
+            const unsigned long u = (unsigned long)q;
+            *p++ = (unsigned char)(u & 0xFF);
+            *p++ = (unsigned char)((u >> 8) & 0xFF);
+            *p++ = (unsigned char)((u >> 16) & 0xFF);
+        }
+    }
+
     virtual void Encode(const float* buf, size_t frames) = 0;
     virtual void Close() = 0;
 
     std::wstring m_path;
-    int m_rate = 48000;
+    int m_rate = 48000;     // the rate going into the file, after conversion
+    int m_bits = 16;
 
 private:
+    Converter m_conv;
+    std::vector<float> m_converted;
     std::deque<float> m_queue;
     std::mutex m_lock;
     std::condition_variable m_wake;
@@ -218,10 +267,13 @@ class WavRecorder : public RecorderBase
 public:
     ~WavRecorder() override { Stop(); }
 
-    bool Start(const std::wstring& path, int rate, int, std::wstring* err) override
+    bool Start(const std::wstring& path, const RecordFormat& f,
+               std::wstring* err) override
     {
         m_path = path;
-        m_rate = rate;
+        // WAV is the one format that takes anything: any rate, and 16 or 24
+        // bit integer or 32 bit float. Nothing is clamped away here.
+        SetFormat(f.inRate, f.rateHz, f.bits);
 
         if (_wfopen_s(&m_f, path.c_str(), L"wb") != 0 || !m_f)
         {
@@ -229,17 +281,22 @@ public:
             return false;
         }
 
-        const int bytesPerFrame = kChannels * 2;
+        const int bytesPerSample = m_bits / 8;
+        const int bytesPerFrame = kChannels * bytesPerSample;
+        // 32 bit is float, which is a different format tag rather than a wider
+        // integer, and float is what the bus already holds - so at 32 bit the
+        // samples go to disk exactly as they arrived.
+        const bool isFloat = (m_bits == 32);
         unsigned char hdr[44] = { 0 };
         memcpy(hdr + 0, "RIFF", 4);
         memcpy(hdr + 8, "WAVEfmt ", 8);
         Put32(hdr + 16, 16);                       // fmt chunk size
-        Put16(hdr + 20, 1);                        // PCM
+        Put16(hdr + 20, isFloat ? 3 : 1);          // IEEE float, or PCM
         Put16(hdr + 22, (unsigned short)kChannels);
-        Put32(hdr + 24, (unsigned)rate);
-        Put32(hdr + 28, (unsigned)(rate * bytesPerFrame));
+        Put32(hdr + 24, (unsigned)m_rate);
+        Put32(hdr + 28, (unsigned)(m_rate * bytesPerFrame));
         Put16(hdr + 32, (unsigned short)bytesPerFrame);
-        Put16(hdr + 34, 16);                       // bits per sample
+        Put16(hdr + 34, (unsigned short)m_bits);
         memcpy(hdr + 36, "data", 4);
         fwrite(hdr, 1, sizeof(hdr), m_f);
 
@@ -251,9 +308,32 @@ protected:
     void Encode(const float* buf, size_t frames) override
     {
         if (!m_f) return;
-        ToPcm16(buf, frames, m_pcm);
-        fwrite(m_pcm.data(), sizeof(short), m_pcm.size(), m_f);
-        m_bytes += m_pcm.size() * sizeof(short);
+        if (m_bits == 32)
+        {
+            // Clamped even so: a sample above full scale is legal in a float
+            // file but is still a sample nothing can play back undistorted,
+            // and every other depth here is clamped.
+            m_flt.assign(buf, buf + frames * kChannels);
+            for (float& v : m_flt)
+            {
+                if (v > 1.0f) v = 1.0f;
+                else if (v < -1.0f) v = -1.0f;
+            }
+            fwrite(m_flt.data(), sizeof(float), m_flt.size(), m_f);
+            m_bytes += m_flt.size() * sizeof(float);
+        }
+        else if (m_bits == 24)
+        {
+            ToPcm24(buf, frames, m_raw);
+            fwrite(m_raw.data(), 1, m_raw.size(), m_f);
+            m_bytes += m_raw.size();
+        }
+        else
+        {
+            ToPcm16(buf, frames, m_pcm);
+            fwrite(m_pcm.data(), sizeof(short), m_pcm.size(), m_f);
+            m_bytes += m_pcm.size() * sizeof(short);
+        }
     }
 
     void Close() override
@@ -281,6 +361,8 @@ private:
     FILE* m_f = nullptr;
     size_t m_bytes = 0;
     std::vector<short> m_pcm;
+    std::vector<unsigned char> m_raw;
+    std::vector<float> m_flt;
 };
 
 // ---------------------------------------------------------------------------
@@ -301,10 +383,16 @@ public:
     explicit MfRecorder(RecFormat fmt) : m_fmt(fmt) {}
     ~MfRecorder() override { Stop(); }
 
-    bool Start(const std::wstring& path, int rate, int kbps, std::wstring* err) override
+    bool Start(const std::wstring& path, const RecordFormat& f,
+               std::wstring* err) override
     {
         m_path = path;
-        m_rate = rate;
+        // Only FLAC has a sample width to choose. MP3 and AAC spend a bitrate
+        // instead, and their input is 16 bit whatever the block asked for.
+        const int bits = (m_fmt == RecFormat::Flac && f.bits == 24) ? 24 : 16;
+        SetFormat(f.inRate, f.rateHz, bits);
+        const int rate = m_rate;
+        const int kbps = f.kbps;
 
         HRESULT hr = MFStartup(MF_VERSION);
         if (FAILED(hr)) { Fail(err, L"Media Foundation could not start", hr); return false; }
@@ -313,13 +401,21 @@ public:
         const GUID sub = (m_fmt == RecFormat::Flac) ? MFAudioFormat_FLAC
                        : (m_fmt == RecFormat::Aac)  ? MFAudioFormat_AAC
                                                     : MFAudioFormat_MP3;
-        IMFMediaType* out = PickOutputType(sub, rate, kbps);
+        IMFMediaType* out = PickOutputType(sub, rate, bits, kbps);
         if (!out)
         {
+            // Worth naming the rates it does take, because the list differs
+            // by format and by Windows release - a fixed sentence here was
+            // guessing, and told anyone at 96 kHz to go and change their
+            // output device when the recorder can simply be set to 48.
+            std::wstring rates;
+            for (int r : RecFormatRates(m_fmt))
+                rates += (rates.empty() ? L"" : L", ") + FormatW(L"%d", r);
             if (err) *err = FormatW(
-                L"Windows has no %s encoder that accepts %d Hz stereo. Record to "
-                L"WAV instead, or set the output device to 44100 or 48000 Hz.",
-                RecFormatName(m_fmt), rate);
+                L"Windows has no %s encoder here that accepts %d Hz stereo at "
+                L"%d bit. Set this block's sample rate to one of these: %s.",
+                RecFormatName(m_fmt), rate, bits,
+                rates.empty() ? L"none at all" : rates.c_str());
             return false;
         }
 
@@ -331,20 +427,25 @@ public:
         if (FAILED(hr)) { Fail(err, L"The encoder rejected the output format", hr); return false; }
 
         IMFMediaType* in = nullptr;
+        const UINT32 align = (UINT32)(kChannels * (bits / 8));
         if (SUCCEEDED(MFCreateMediaType(&in)) && in)
         {
             in->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
             in->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-            in->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+            in->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, (UINT32)bits);
             in->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, (UINT32)rate);
             in->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, kChannels);
-            in->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, kChannels * 2);
-            in->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, (UINT32)(rate * kChannels * 2));
+            in->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, align);
+            in->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, (UINT32)rate * align);
             in->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
             hr = m_writer->SetInputMediaType(m_stream, in, nullptr);
             in->Release();
         }
-        if (FAILED(hr)) { Fail(err, L"The encoder rejected 16 bit PCM input", hr); return false; }
+        if (FAILED(hr))
+        {
+            Fail(err, FormatW(L"The encoder rejected %d bit PCM input", bits), hr);
+            return false;
+        }
 
         hr = m_writer->BeginWriting();
         if (FAILED(hr)) { Fail(err, L"The encoder could not start", hr); return false; }
@@ -357,9 +458,21 @@ protected:
     void Encode(const float* buf, size_t frames) override
     {
         if (!m_writer || frames == 0) return;
-        ToPcm16(buf, frames, m_pcm);
+        const void* src = nullptr;
+        DWORD bytes = 0;
+        if (m_bits == 24)
+        {
+            ToPcm24(buf, frames, m_raw);
+            src = m_raw.data();
+            bytes = (DWORD)m_raw.size();
+        }
+        else
+        {
+            ToPcm16(buf, frames, m_pcm);
+            src = m_pcm.data();
+            bytes = (DWORD)(m_pcm.size() * sizeof(short));
+        }
 
-        const DWORD bytes = (DWORD)(m_pcm.size() * sizeof(short));
         IMFMediaBuffer* mb = nullptr;
         if (FAILED(MFCreateMemoryBuffer(bytes, &mb)) || !mb) return;
 
@@ -367,7 +480,7 @@ protected:
         DWORD maxLen = 0;
         if (SUCCEEDED(mb->Lock(&p, &maxLen, nullptr)))
         {
-            memcpy(p, m_pcm.data(), bytes);
+            memcpy(p, src, bytes);
             mb->Unlock();
             mb->SetCurrentLength(bytes);
 
@@ -403,10 +516,11 @@ private:
         if (err) *err = what + L" (" + HrText(hr) + L").";
     }
 
-    // Picks the encoder output type matching our rate and channel count. For
-    // FLAC the bit depth has to match the input type exactly, and for MP3 we
-    // take whichever advertised bitrate is closest to the one asked for.
-    static IMFMediaType* PickOutputType(const GUID& sub, int rate, int kbps)
+    // Picks the encoder output type matching our rate, depth and channel
+    // count. For FLAC the bit depth has to match the input type exactly, and
+    // for MP3 we take whichever advertised bitrate is closest to the one
+    // asked for.
+    static IMFMediaType* PickOutputType(const GUID& sub, int rate, int bits, int kbps)
     {
         IMFCollection* col = nullptr;
         if (FAILED(MFTranscodeGetAudioOutputAvailableTypes(sub, MFT_ENUM_FLAG_ALL,
@@ -428,14 +542,16 @@ private:
             IMFMediaType* t = nullptr;
             if (SUCCEEDED(unk->QueryInterface(IID_PPV_ARGS(&t))) && t)
             {
-                UINT32 sr = 0, ch = 0, bits = 0, bps = 0;
+                UINT32 sr = 0, ch = 0, typeBits = 0, bps = 0;
                 t->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &sr);
                 t->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &ch);
-                t->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bits);
+                t->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &typeBits);
                 t->GetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, &bps);
 
+                // A type reporting no depth at all is a lossy one, where the
+                // field means nothing, so those are taken as they come.
                 bool ok = (sr == (UINT32)rate) && (ch == (UINT32)kChannels) &&
-                          (bits == 0 || bits == 16);
+                          (typeBits == 0 || typeBits == (UINT32)bits);
                 if (ok)
                 {
                     UINT32 d = (bps > wantBytes) ? bps - wantBytes : wantBytes - bps;
@@ -461,6 +577,7 @@ private:
     LONGLONG m_time = 0;
     bool m_mfUp = false;
     std::vector<short> m_pcm;
+    std::vector<unsigned char> m_raw;
 };
 
 // Media Foundation is delay loaded, so nothing here touches it until this
@@ -518,6 +635,206 @@ std::unique_ptr<Recorder> MakeRecorder(RecFormat fmt)
 }
 
 // ---------------------------------------------------------------------------
+// What each format can be written as
+//
+// Not a table of what the formats support in the abstract: a table of what
+// this machine can actually do, because for FLAC, MP3 and AAC the encoder is
+// Windows' own and its list differs by release. Asked once, since it cannot
+// change while we run.
+// ---------------------------------------------------------------------------
+
+// The rates the encoder for `sub` advertises for stereo, ascending.
+static std::vector<int> MfRatesFor(const GUID& sub, int* widestDepth)
+{
+    std::vector<int> out;
+    if (widestDepth) *widestDepth = 16;
+    if (!MediaFoundationAvailable()) return out;
+    if (FAILED(MFStartup(MF_VERSION))) return out;
+
+    IMFCollection* col = nullptr;
+    if (SUCCEEDED(MFTranscodeGetAudioOutputAvailableTypes(sub, MFT_ENUM_FLAG_ALL,
+                                                          nullptr, &col)) && col)
+    {
+        DWORD count = 0;
+        col->GetElementCount(&count);
+        for (DWORD i = 0; i < count; ++i)
+        {
+            IUnknown* unk = nullptr;
+            if (FAILED(col->GetElement(i, &unk)) || !unk) continue;
+            IMFMediaType* t = nullptr;
+            if (SUCCEEDED(unk->QueryInterface(IID_PPV_ARGS(&t))) && t)
+            {
+                UINT32 sr = 0, ch = 0, bits = 0;
+                t->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &sr);
+                t->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &ch);
+                t->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bits);
+                if (ch == (UINT32)kChannels && sr > 0)
+                {
+                    if (std::find(out.begin(), out.end(), (int)sr) == out.end())
+                        out.push_back((int)sr);
+                    if (widestDepth && bits == 24) *widestDepth = 24;
+                }
+                t->Release();
+            }
+            unk->Release();
+        }
+        col->Release();
+    }
+    MFShutdown();
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+// Opus is a 48 kHz format: the encoder accepts other rates and resamples to
+// 48 kHz regardless, and the original rate survives only as a number in the
+// header. So the file's rate is not a choice, and saying so beats offering a
+// setting that does nothing.
+static const int kOpusFileRate = 48000;
+
+// The bitrates a recorder offers. One list, in one place, because the dialog
+// and the resolving below have to agree about what was on offer.
+const int kRecBitrates[] = { 96, 128, 160, 192, 256, 320 };
+const int kRecBitrateCount = (int)(sizeof(kRecBitrates) / sizeof(kRecBitrates[0]));
+
+// Every rate a block may be set to, before a format narrows it.
+static const int kCandidateRates[] = { 8000, 11025, 16000, 22050, 24000, 32000,
+                                       44100, 48000, 88200, 96000, 176400, 192000 };
+
+const std::vector<int>& RecFormatRates(RecFormat fmt)
+{
+    // Written once each, on first ask. Empty stands for "any rate at all",
+    // which is true of the two formats FastRoute writes itself.
+    static std::vector<int> cache[kRecFormatCount];
+    static bool done[kRecFormatCount] = { false };
+
+    const int idx = (fmt >= RecFormat::Wav && (int)fmt < kRecFormatCount) ? (int)fmt : 0;
+    if (!done[idx])
+    {
+        switch ((RecFormat)idx)
+        {
+        case RecFormat::Flac:
+            cache[idx] = MfRatesFor(MFAudioFormat_FLAC, nullptr);
+            break;
+        case RecFormat::Mp3:
+            cache[idx] = MfRatesFor(MFAudioFormat_MP3, nullptr);
+            break;
+        case RecFormat::Aac:
+            cache[idx] = MfRatesFor(MFAudioFormat_AAC, nullptr);
+            break;
+        case RecFormat::Opus:
+            cache[idx] = { kOpusFileRate };
+            break;
+        case RecFormat::Ogg:
+            // Asked of libvorbis, which refuses more than the rate alone
+            // decides: a rate counts as usable only if some bitrate we offer
+            // can actually be written at it.
+            for (int r : kCandidateRates)
+                for (int k = 0; k < kRecBitrateCount; ++k)
+                    if (VorbisAccepts(r, kRecBitrates[k]))
+                    {
+                        cache[idx].push_back(r);
+                        break;
+                    }
+            break;
+        default:
+            break;                     // WAV: any rate at all
+        }
+        done[idx] = true;
+    }
+    return cache[idx];
+}
+
+const std::vector<int>& RecFormatDepths(RecFormat fmt)
+{
+    static std::vector<int> wav = { 16, 24, 32 };
+    static std::vector<int> flac;
+    static bool flacDone = false;
+    static std::vector<int> none;
+
+    if (fmt == RecFormat::Wav) return wav;
+    if (fmt == RecFormat::Flac)
+    {
+        if (!flacDone)
+        {
+            int widest = 16;
+            MfRatesFor(MFAudioFormat_FLAC, &widest);
+            flac.push_back(16);
+            if (widest >= 24) flac.push_back(24);
+            flacDone = true;
+        }
+        return flac;
+    }
+    return none;                       // the lossy formats have no depth
+}
+
+std::vector<int> RecFormatBitrates(RecFormat fmt, int rateHz)
+{
+    std::vector<int> out;
+    if (!RecFormatUsesBitrate(fmt)) return out;      // WAV and FLAC have none
+
+    for (int i = 0; i < kRecBitrateCount; ++i)
+    {
+        // Only Vorbis ties the two together. Opus takes anything in this
+        // range, and MP3 and AAC take the nearest their encoder advertises
+        // rather than refusing, so for those the rate does not narrow it.
+        if (fmt == RecFormat::Ogg && rateHz > 0 &&
+            !VorbisAccepts(rateHz, kRecBitrates[i]))
+            continue;
+        out.push_back(kRecBitrates[i]);
+    }
+    return out;
+}
+
+RecordFormat RecFileFormatFor(RecFormat fmt, int rateHz, int bits, int kbps,
+                              int sessionRate)
+{
+    RecordFormat f;
+    f.inRate = sessionRate > 0 ? sessionRate : kDefaultRate;
+    f.kbps = kbps;
+
+    // Rate. Zero means the session's own, which is also where an unusable
+    // choice lands: a rate the format cannot take is no better than no choice
+    // at all, and the recorder will say so by name when it refuses.
+    const std::vector<int>& rates = RecFormatRates(fmt);
+    f.rateHz = (rateHz > 0) ? rateHz : f.inRate;
+    if (!rates.empty() &&
+        std::find(rates.begin(), rates.end(), f.rateHz) == rates.end())
+    {
+        // Opus has exactly one, so this lands on it rather than on a rate it
+        // would silently convert away from anyway.
+        f.rateHz = (rates.size() == 1) ? rates.front()
+                 : (std::find(rates.begin(), rates.end(), f.inRate) != rates.end()
+                        ? f.inRate : f.rateHz);
+    }
+
+    // Depth. Zero means the format's own default, which is 16: that is what
+    // every format here was written at before this was a choice.
+    const std::vector<int>& depths = RecFormatDepths(fmt);
+    f.bits = (bits == 16 || bits == 24 || bits == 32) ? bits : 16;
+    if (depths.empty())
+        f.bits = 16;                   // lossy: the field means nothing
+    else if (std::find(depths.begin(), depths.end(), f.bits) == depths.end())
+        f.bits = 16;
+
+    // Bitrate, last, because for Vorbis it depends on the rate settled on
+    // just above. A document can hold a pair the encoder will not take - the
+    // rate was changed and the bitrate left where it was, or the two were
+    // written by a build whose libvorbis took more - and refusing to record
+    // over it would be the wrong answer when MP3 has always just taken the
+    // nearest it could get.
+    const std::vector<int> rates2 = RecFormatBitrates(fmt, f.rateHz);
+    if (!rates2.empty() &&
+        std::find(rates2.begin(), rates2.end(), f.kbps) == rates2.end())
+    {
+        int best = rates2.front();
+        for (int k : rates2)
+            if (abs(k - f.kbps) < abs(best - f.kbps)) best = k;
+        f.kbps = best;
+    }
+    return f;
+}
+
+// ---------------------------------------------------------------------------
 // Recorder block output: silence gate and file splitting
 // ---------------------------------------------------------------------------
 
@@ -534,6 +851,8 @@ RecordSettings RecordSettingsFor(const Block& b, const std::wstring& sessionName
     s.fmt = (RecFormat)((b.recFormat >= 0 && b.recFormat < kRecFormatCount)
                             ? b.recFormat : 0);
     s.kbps = b.bitrateKbps;
+    s.rateHz = b.recRateHz;
+    s.bits = b.recBits;
     s.skipSilence = b.skipSilence;
     s.silenceDb = b.silenceDb;
     s.holdSeconds = b.silenceHoldSec;
@@ -704,8 +1023,14 @@ bool RecordSink::Open(std::wstring* err)
     std::wstring path = ResolveRecordingPath(s.folder, s.nameTemplate, s.sessionName,
                                             s.fmt, s.blockName);
 
+    const RecordFormat rf = RecFileFormatFor(s.fmt, s.rateHz, s.bits, s.kbps, m_rate);
     std::unique_ptr<Recorder> r = MakeRecorder(s.fmt);
-    if (!r || !r->Start(path, m_rate, s.kbps, err)) return false;
+    if (!r || !r->Start(path, rf, err)) return false;
+
+    // How a WAV's size is worked out from its frame count, which is the one
+    // thing the splitting cannot ask the file system for without lagging.
+    m_fileRate = rf.rateHz;
+    m_fileBytesPerFrame = kChannels * (rf.bits / 8);
 
     m_file = std::move(r);
     m_fileFrames = 0;
@@ -837,7 +1162,7 @@ unsigned long long RecordSink::CurrentBytes(const RecordSettings& s)
     unsigned long long bytes = 0;
     if (s.fmt == RecFormat::Wav)
     {
-        bytes = 44ull + m_fileFrames * (unsigned long long)(kChannels * 2);
+        bytes = 44ull + FileFrames() * (unsigned long long)m_fileBytesPerFrame;
     }
     else
     {
@@ -919,7 +1244,8 @@ void RecordSink::Emit(const float* buf, size_t frames)
         // here for nothing. The encoded formats are only measured when the
         // splitting asks, which is often enough for a status line.
         if (Snapshot().fmt == RecFormat::Wav)
-            m_bytes.store(44ull + m_fileFrames * (unsigned long long)(kChannels * 2));
+            m_bytes.store(44ull + FileFrames() *
+                                      (unsigned long long)m_fileBytesPerFrame);
         buf += take * kChannels;
         frames -= take;
 

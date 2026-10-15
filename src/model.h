@@ -581,6 +581,17 @@ struct Block
     int recFormat = 0;          // 0 wav, 1 flac, 2 mp3
     int bitrateKbps = 192;
     int recMode = RM_MIXED;     // the mix, a file per input block, or both
+    // What the file is written as, as opposed to what the session runs at.
+    // Zero for either means "whatever recording would have used anyway", so
+    // a document written before these existed reads exactly as it did.
+    //
+    // The session's rate is the first output block's, which is not always a
+    // rate the chosen format can even be written at - Windows' FLAC encoder
+    // starts at 44100, so a session running at 32000 could not record FLAC at
+    // all. Choosing the file's rate here is what makes that possible, as well
+    // as being worth having in its own right.
+    int recRateHz = 0;          // 0 == the session's own rate
+    int recBits = 0;            // 0 == the format's default; 16, 24 or 32
 
     // output.recorder: silence gate. Audio quieter than the threshold is not
     // written at all, so the file skips it rather than storing it.

@@ -552,16 +552,60 @@ const wchar_t* RecFormatShortName(RecFormat fmt);  // "MP3"
 // are what they are; the rest are told how many bits a second to spend.
 bool RecFormatUsesBitrate(RecFormat fmt);
 
+// What one file is actually written as, after the block's choices and the
+// format's own limits have both been applied. Write() is always called at
+// `inRate` - the session's rate - and the recorder converts to `rateHz` on its
+// own writer thread, so nothing of this reaches the audio clock.
+struct RecordFormat
+{
+    int inRate = kDefaultRate;   // the rate Write() is called at
+    int rateHz = kDefaultRate;   // what goes into the file
+    int bits   = 16;             // 16, 24, or 32 for float; ignored if lossy
+    int kbps   = 192;
+};
+
 class Recorder
 {
 public:
     virtual ~Recorder() {}
     // `path` is the fully resolved output file, extension included.
-    virtual bool Start(const std::wstring& path, int rate, int kbps, std::wstring* err) = 0;
+    virtual bool Start(const std::wstring& path, const RecordFormat& f,
+                       std::wstring* err) = 0;
     virtual void Write(const float* buf, size_t frames) = 0;
     virtual void Stop() = 0;
     virtual std::wstring Path() const = 0;
 };
+
+// The rates a format can be written at here, ascending. Empty means any rate,
+// which is the case for the two formats FastRoute writes itself and can size
+// freely. For the three Windows encodes this is what its encoder actually
+// offers, asked once and remembered - and it is not the same list for each:
+// FLAC starts at 44100 and MP3 stops at 48000.
+const std::vector<int>& RecFormatRates(RecFormat fmt);
+// The bit depths worth offering. Empty for a lossy format, which has none:
+// what it spends per second is the bitrate, not a sample width.
+const std::vector<int>& RecFormatDepths(RecFormat fmt);
+// The bitrates worth offering for a format at a rate, ascending. Empty when
+// the format has no bitrate at all.
+//
+// The rate is a parameter because for Ogg Vorbis the two are not independent:
+// libvorbis refuses 192 kbps at 22050 Hz outright. MP3 and AAC never refuse -
+// they take the nearest their encoder advertises - so for those this is the
+// whole list whatever the rate.
+std::vector<int> RecFormatBitrates(RecFormat fmt, int rateHz);
+// Whether libvorbis will set up for this pair at all. Lives with the Vorbis
+// encoder, in oggout.cpp, and is asked by the two lists above.
+bool VorbisAccepts(int rate, int kbps);
+// The bitrates a recorder block offers before any format has had its say.
+extern const int kRecBitrates[];
+extern const int kRecBitrateCount;
+// A block's rate and depth, resolved against the format's limits and the rate
+// the session is running at. Zero for either asks for the default. This is the
+// one place that decides, so the recorder that writes the file, the accounting
+// that works out how large it is, and the dialog that offers the choices all
+// agree about what was asked for.
+RecordFormat RecFileFormatFor(RecFormat fmt, int rateHz, int bits, int kbps,
+                              int sessionRate);
 
 std::unique_ptr<Recorder> MakeRecorder(RecFormat fmt);
 std::unique_ptr<Recorder> MakeVorbisRecorder();
@@ -594,6 +638,8 @@ struct RecordSettings
     std::wstring blockName;
     RecFormat fmt = RecFormat::Wav;
     int  kbps = 192;
+    int  rateHz = 0;            // 0 == the rate the session is running at
+    int  bits = 0;              // 0 == the format's own default
 
     bool skipSilence = false;
     int  silenceDb = -50;       // dBFS
@@ -657,11 +703,24 @@ private:
     bool CheckSize(const RecordSettings& s);
     unsigned long long CurrentBytes(const RecordSettings& s);
     RecordSettings Snapshot();
+    // m_fileFrames is counted as the audio arrives, at the session's rate.
+    // How many frames that is in the file is a different number whenever the
+    // block records at a rate of its own.
+    unsigned long long FileFrames() const
+    {
+        if (m_fileRate == m_rate || m_rate <= 0) return m_fileFrames;
+        return (unsigned long long)((double)m_fileFrames * m_fileRate / m_rate);
+    }
 
     RecordSettings m_set;
     std::mutex m_setLock;
 
-    int m_rate = kDefaultRate;
+    int m_rate = kDefaultRate;         // the session's rate: what arrives
+    // What the file is written as, which need not be what arrives. Kept here
+    // because a WAV's size follows from its own frame count and sample width
+    // exactly, and that is what the splitting relies on.
+    int m_fileRate = kDefaultRate;
+    int m_fileBytesPerFrame = kChannels * 2;
     std::unique_ptr<Recorder> m_file;
     std::atomic<int> m_files{ 0 };
     std::atomic<bool> m_skipping{ false };

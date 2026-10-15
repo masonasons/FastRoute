@@ -26,18 +26,23 @@ public:
     // Idempotent: asking for the same pair twice keeps the state, so a stream
     // that reports its rate on every packet does not restart the filter on
     // every packet.
-    bool Prepare(int rateIn, int rateOut)
+    // `quality` is speex's own 0 to 10. The default suits a live stream, where
+    // the work happens between two audio callbacks. A recording converts on a
+    // writer thread with a whole file's worth of slack, so it asks for more.
+    bool Prepare(int rateIn, int rateOut, int quality = 5)
     {
-        if (m_res && rateIn == m_in && rateOut == m_out) return true;
+        if (m_res && rateIn == m_in && rateOut == m_out && quality == m_quality)
+            return true;
         if (m_res) { speex_resampler_destroy(m_res); m_res = nullptr; }
         m_in = rateIn;
         m_out = rateOut;
+        m_quality = quality;
         if (rateIn == rateOut) return true;
         if (rateIn <= 0 || rateOut <= 0) return false;
 
         int errCode = 0;
         m_res = speex_resampler_init((spx_uint32_t)kChannels, (spx_uint32_t)rateIn,
-                                     (spx_uint32_t)rateOut, 5, &errCode);
+                                     (spx_uint32_t)rateOut, quality, &errCode);
         return m_res != nullptr;
     }
 
@@ -77,4 +82,5 @@ public:
 private:
     SpeexResamplerState* m_res = nullptr;
     int m_in = 0, m_out = 0;
+    int m_quality = 5;
 };

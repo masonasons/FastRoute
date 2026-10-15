@@ -593,6 +593,12 @@ std::wstring Block::ParamSummary() const
             extra += FormatW(L", new file every %d minutes", splitMinutes);
         else if (splitMode == 2)
             extra += FormatW(L", new file every %d MB", splitMb);
+        // Only when it has been chosen. The ordinary case is the session's own
+        // rate and the format's own depth, and saying so every time would bury
+        // the settings that were actually touched.
+        if (recRateHz > 0) extra += FormatW(L", at %d Hz", recRateHz);
+        if (recBits == 32) extra += L", 32 bit float";
+        else if (recBits > 0) extra += FormatW(L", %d bit", recBits);
         // Said first, because it decides how many files there are at all.
         std::wstring what;
         if (recMode == RM_TRACKS) what = L"a file per input block, ";
@@ -1227,6 +1233,11 @@ void SessionStore::Load()
                 b.recMode        = jb.AsInt(L"recMode", RM_MIXED);
                 if (b.recMode < RM_MIXED || b.recMode > RM_BOTH)
                     b.recMode = RM_MIXED;
+                b.recRateHz      = jb.AsInt(L"recRate", 0);
+                b.recBits        = jb.AsInt(L"recBits", 0);
+                if (b.recRateHz < 0) b.recRateHz = 0;
+                if (b.recBits != 16 && b.recBits != 24 && b.recBits != 32)
+                    b.recBits = 0;
                 b.enabled     = jb.AsBool(L"enabled", true);
                 b.hotkey      = ReadHotkey(jb);
                 s.blocks.push_back(b);
@@ -1557,6 +1568,10 @@ bool SessionStore::Save(std::wstring* err) const
                 // FastRoute reads is unchanged until the feature is used - and
                 // that older one then writes the mix, which is what it did.
                 if (b.recMode != RM_MIXED) jb.Set(L"recMode", Json::Num(b.recMode));
+                // Same again: absent means the session's rate and the format's
+                // own depth, which is what recording did before these existed.
+                if (b.recRateHz > 0) jb.Set(L"recRate", Json::Num(b.recRateHz));
+                if (b.recBits > 0) jb.Set(L"recBits", Json::Num(b.recBits));
             }
             if (!b.label.empty()) jb.Set(L"label", Json::Str(b.label));
             jb.Set(L"volume", Json::Num(b.volumePct));

@@ -1029,7 +1029,6 @@ static bool PickFolder(HWND owner, std::wstring& path,
     return ok;
 }
 
-static const int kKbps[] = { 96, 128, 160, 192, 256, 320 };
 
 // Which formats this copy of Windows can actually encode. A format Windows
 // has no encoder for is left out of the list entirely rather than offered and
@@ -1047,6 +1046,12 @@ static std::vector<FormatChoice> AvailableFormats()
     }
     return out;
 }
+
+static void FillRateAndDepth(HWND dlg, const Block* b);
+static void FillBitrate(HWND dlg, int want);
+static int SelectedRecRate(HWND dlg);
+static int SelectedRecBits(HWND dlg);
+static int SelectedBitrate(HWND dlg);
 
 static int SelectedFormat(HWND dlg)
 {
@@ -1085,15 +1090,124 @@ static void FillFileFields(HWND dlg, const Block* b, const wchar_t* tokenHelp)
     }
     SendMessageW(fc, CB_SETCURSEL, fsel, 0);
 
-    HWND kc = GetDlgItem(dlg, IDC_REC_KBPS);
-    int sel = 3;
-    for (int i = 0; i < (int)(sizeof(kKbps) / sizeof(kKbps[0])); ++i)
+    FillRateAndDepth(dlg, b);
+    FillBitrate(dlg, b->bitrateKbps);
+}
+
+// The sample rate and bit depth, which depend on the format: Windows' FLAC
+// encoder starts at 44100 and its MP3 encoder stops at 48000, and the lossy
+// formats have no bit depth at all. Refilled whenever the format changes, so
+// what is in the list is always something the file can actually be written as
+// rather than something that fails when you press run.
+static void FillRateAndDepth(HWND dlg, const Block* b)
+{
+    const RecFormat fmt = (RecFormat)SelectedFormat(dlg);
+
+    HWND rc = GetDlgItem(dlg, IDC_REC_RATE);
+    SendMessageW(rc, CB_RESETCONTENT, 0, 0);
+    int at = (int)SendMessageW(rc, CB_ADDSTRING, 0,
+                               (LPARAM)L"The session's own rate");
+    SendMessageW(rc, CB_SETITEMDATA, at, 0);
+    int rsel = 0;
+
+    const std::vector<int>& offered = RecFormatRates(fmt);
+    // Empty means the format takes anything, so the choice is ours to make.
+    static const int kAnyRates[] = { 8000, 11025, 16000, 22050, 24000, 32000,
+                                     44100, 48000, 88200, 96000, 176400, 192000 };
+    std::vector<int> rates = offered;
+    if (rates.empty())
+        rates.assign(kAnyRates, kAnyRates + sizeof(kAnyRates) / sizeof(kAnyRates[0]));
+
+    for (int hz : rates)
     {
-        SendMessageW(kc, CB_ADDSTRING, 0,
-                     (LPARAM)FormatW(L"%d kbps", kKbps[i]).c_str());
-        if (kKbps[i] == b->bitrateKbps) sel = i;
+        at = (int)SendMessageW(rc, CB_ADDSTRING, 0,
+                               (LPARAM)FormatW(L"%d Hz", hz).c_str());
+        SendMessageW(rc, CB_SETITEMDATA, at, (LPARAM)hz);
+        if (hz == b->recRateHz) rsel = at;
+    }
+    SendMessageW(rc, CB_SETCURSEL, rsel, 0);
+    // One rate on offer is not a choice: Opus writes 48 kHz whatever it is
+    // handed, and a combo that can only be set to what it already says would
+    // be a control that does nothing.
+    EnableWindow(rc, rates.size() > 1);
+    EnableWindow(GetDlgItem(dlg, IDC_REC_RATE_LABEL), rates.size() > 1);
+
+    HWND bc = GetDlgItem(dlg, IDC_REC_BITS);
+    SendMessageW(bc, CB_RESETCONTENT, 0, 0);
+    const std::vector<int>& depths = RecFormatDepths(fmt);
+    at = (int)SendMessageW(bc, CB_ADDSTRING, 0, (LPARAM)L"16 bit, the default");
+    SendMessageW(bc, CB_SETITEMDATA, at, 0);
+    int bsel = 0;
+    for (int bits : depths)
+    {
+        if (bits == 16) continue;      // already there, as the default
+        at = (int)SendMessageW(bc, CB_ADDSTRING, 0,
+                               (LPARAM)(bits == 32 ? L"32 bit float"
+                                                   : FormatW(L"%d bit", bits).c_str()));
+        SendMessageW(bc, CB_SETITEMDATA, at, (LPARAM)bits);
+        if (bits == b->recBits) bsel = at;
+    }
+    SendMessageW(bc, CB_SETCURSEL, bsel, 0);
+    EnableWindow(bc, !depths.empty());
+    EnableWindow(GetDlgItem(dlg, IDC_REC_BITS_LABEL), !depths.empty());
+}
+
+// The bitrates the chosen format can be written at, at the chosen rate.
+// libvorbis refuses 192 kbps at 22050 Hz, so for Ogg this list shortens as
+// the rate comes down - and a bitrate that cannot be written must not be
+// something the dialog let you pick.
+static void FillBitrate(HWND dlg, int want)
+{
+    const RecFormat fmt = (RecFormat)SelectedFormat(dlg);
+    const std::vector<int> kbps = RecFormatBitrates(fmt, SelectedRecRate(dlg));
+
+    HWND kc = GetDlgItem(dlg, IDC_REC_KBPS);
+    SendMessageW(kc, CB_RESETCONTENT, 0, 0);
+    int sel = 0, bestDelta = -1;
+    for (size_t i = 0; i < kbps.size(); ++i)
+    {
+        const int at = (int)SendMessageW(kc, CB_ADDSTRING, 0,
+                                         (LPARAM)FormatW(L"%d kbps", kbps[i]).c_str());
+        SendMessageW(kc, CB_SETITEMDATA, at, (LPARAM)kbps[i]);
+        // Nearest to what the block asked for, so narrowing the list moves the
+        // selection as little as it can rather than back to the start of it.
+        const int delta = kbps[i] > want ? kbps[i] - want : want - kbps[i];
+        if (bestDelta < 0 || delta < bestDelta) { bestDelta = delta; sel = at; }
     }
     SendMessageW(kc, CB_SETCURSEL, sel, 0);
+
+    const bool lossy = !kbps.empty();
+    EnableWindow(kc, lossy);
+    EnableWindow(GetDlgItem(dlg, IDC_REC_KBPS_LABEL), lossy);
+}
+
+static int SelectedBitrate(HWND dlg)
+{
+    HWND kc = GetDlgItem(dlg, IDC_REC_KBPS);
+    const int sel = (int)SendMessageW(kc, CB_GETCURSEL, 0, 0);
+    if (sel < 0) return 192;
+    return (int)SendMessageW(kc, CB_GETITEMDATA, sel, 0);
+}
+
+// Which rate and depth the two combos are on. Nothing is read from a combo
+// that the format has disabled: it still holds whatever the last format put
+// there, and storing that would quietly change a setting nobody touched.
+static int SelectedRecRate(HWND dlg)
+{
+    HWND rc = GetDlgItem(dlg, IDC_REC_RATE);
+    if (!IsWindowEnabled(rc)) return 0;
+    const int sel = (int)SendMessageW(rc, CB_GETCURSEL, 0, 0);
+    if (sel < 0) return 0;
+    return (int)SendMessageW(rc, CB_GETITEMDATA, sel, 0);
+}
+
+static int SelectedRecBits(HWND dlg)
+{
+    HWND bc = GetDlgItem(dlg, IDC_REC_BITS);
+    if (!IsWindowEnabled(bc)) return 0;
+    const int sel = (int)SendMessageW(bc, CB_GETCURSEL, 0, 0);
+    if (sel < 0) return 0;
+    return (int)SendMessageW(bc, CB_GETITEMDATA, sel, 0);
 }
 
 static void ReadFileFields(HWND dlg, Block* b)
@@ -1105,16 +1219,34 @@ static void ReadFileFields(HWND dlg, Block* b)
     b->nameTemplate = Trim(tmpl);
     b->recFormat = SelectedFormat(dlg);
 
-    int k = (int)SendDlgItemMessageW(dlg, IDC_REC_KBPS, CB_GETCURSEL, 0, 0);
-    if (k >= 0 && k < (int)(sizeof(kKbps) / sizeof(kKbps[0]))) b->bitrateKbps = kKbps[k];
+    // Left alone when the format has no bitrate, so switching a block to WAV
+    // and back does not lose the bitrate it was set to.
+    if (IsWindowEnabled(GetDlgItem(dlg, IDC_REC_KBPS)))
+        b->bitrateKbps = SelectedBitrate(dlg);
+
+    b->recRateHz = SelectedRecRate(dlg);
+    b->recBits = SelectedRecBits(dlg);
 }
 
-// The bitrate only means anything for the formats that have one.
+// The bitrate only means anything for the formats that have one, and which
+// ones those are depends on the rate as well for Ogg Vorbis.
 static void SyncBitrateField(HWND dlg)
 {
-    bool lossy = RecFormatUsesBitrate((RecFormat)SelectedFormat(dlg));
-    EnableWindow(GetDlgItem(dlg, IDC_REC_KBPS), lossy);
-    EnableWindow(GetDlgItem(dlg, IDC_REC_KBPS_LABEL), lossy);
+    FillBitrate(dlg, SelectedBitrate(dlg));
+}
+
+// Rebuilt from what is selected now rather than from the block, so a rate
+// still on offer after the format changed stays chosen and one that is not
+// falls back to the session's rather than to something silently different.
+// The bitrate follows, because changing the rate can shorten its list.
+static void RefillRateAndDepth(HWND dlg)
+{
+    Block probe;
+    probe.recRateHz = SelectedRecRate(dlg);
+    probe.recBits = SelectedRecBits(dlg);
+    const int kbps = SelectedBitrate(dlg);
+    FillRateAndDepth(dlg, &probe);
+    FillBitrate(dlg, kbps);
 }
 
 // Which of the three the combo is on. Position is the value, which is why the
@@ -1246,6 +1378,18 @@ static INT_PTR CALLBACK RecorderDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
         switch (LOWORD(wp))
         {
         case IDC_REC_FORMAT:
+            if (HIWORD(wp) == CBN_SELCHANGE)
+            {
+                SyncRecorderFields(dlg);
+                RefillRateAndDepth(dlg);
+            }
+            return TRUE;
+
+        // Changing the rate can shorten what bitrates are left, for Ogg.
+        case IDC_REC_RATE:
+            if (HIWORD(wp) == CBN_SELCHANGE) SyncBitrateField(dlg);
+            return TRUE;
+
         case IDC_REC_SPLIT:
         case IDC_REC_MODE:
             if (HIWORD(wp) == CBN_SELCHANGE) SyncRecorderFields(dlg);
@@ -2117,6 +2261,14 @@ static INT_PTR CALLBACK BufferDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         switch (LOWORD(wp))
         {
         case IDC_REC_FORMAT:
+            if (HIWORD(wp) == CBN_SELCHANGE)
+            {
+                SyncBitrateField(dlg);
+                RefillRateAndDepth(dlg);
+            }
+            return TRUE;
+
+        case IDC_REC_RATE:
             if (HIWORD(wp) == CBN_SELCHANGE) SyncBitrateField(dlg);
             return TRUE;
 

@@ -99,8 +99,9 @@ std::wstring Engine::KeyFor(const Block& b)
         // so it all belongs in the key. Volume and enabled deliberately do not.
         // The mode is in it because it decides whether this block writes a
         // mixed file at all.
-        return FormatW(L"rec|%s|%s|%d|%d|%d", b.folder.c_str(), b.nameTemplate.c_str(),
-                       b.recFormat, b.bitrateKbps, b.recMode);
+        return FormatW(L"rec|%s|%s|%d|%d|%d|%d|%d", b.folder.c_str(),
+                       b.nameTemplate.c_str(), b.recFormat, b.bitrateKbps,
+                       b.recMode, b.recRateHz, b.recBits);
     }
     return b.typeId;
 }

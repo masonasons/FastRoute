@@ -1,4 +1,5 @@
 #include "audio.h"
+#include "resample.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -9,7 +10,6 @@ extern "C" {
 #include <ogg/ogg.h>
 #include <vorbis/vorbisenc.h>
 #include <opus.h>
-#include <speex/speex_resampler.h>
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +71,18 @@ protected:
         return true;
     }
 
+    // What this file is written as, once the codec has had its say. After
+    // this m_rate is the rate going into the file and Encode is called at it.
+    // The same two steps as RecorderBase in recorder.cpp, written out again
+    // rather than shared, because the writer thread beside it is too.
+    void SetFormat(int inRate, int fileRate)
+    {
+        m_inRate = inRate > 0 ? inRate : fileRate;
+        m_rate = fileRate > 0 ? fileRate : m_inRate;
+        // Quality 10, not the live default: nothing waits on this but a file.
+        m_conv.Prepare(m_inRate, m_rate, 10);
+    }
+
     void RunWriter()
     {
         m_running = true;
@@ -85,7 +97,17 @@ protected:
                     chunk.assign(m_queue.begin(), m_queue.end());
                     m_queue.clear();
                 }
-                if (!chunk.empty()) Encode(chunk.data(), chunk.size() / kChannels);
+                if (chunk.empty()) continue;
+
+                if (!m_conv.Engaged())
+                {
+                    Encode(chunk.data(), chunk.size() / kChannels);
+                    continue;
+                }
+                m_converted.clear();
+                m_conv.Run(chunk.data(), chunk.size() / kChannels, m_converted);
+                if (!m_converted.empty())
+                    Encode(m_converted.data(), m_converted.size() / kChannels);
             }
         });
     }
@@ -102,9 +124,12 @@ protected:
 
     std::wstring m_path;
     FILE* m_f = nullptr;
-    int m_rate = 48000;
+    int m_rate = 48000;     // the rate going into the file, after conversion
+    int m_inRate = 48000;   // the rate Write() is called at
 
 private:
+    Converter m_conv;
+    std::vector<float> m_converted;
     std::deque<float> m_queue;
     std::mutex m_lock;
     std::condition_variable m_wake;
@@ -120,10 +145,14 @@ class VorbisRecorder : public OggWriterBase
 public:
     ~VorbisRecorder() override { Stop(); Release(); }
 
-    bool Start(const std::wstring& path, int rate, int kbps, std::wstring* err) override
+    bool Start(const std::wstring& path, const RecordFormat& f,
+               std::wstring* err) override
     {
         if (!OpenFile(path, err)) return false;
-        m_rate = rate;
+        // Vorbis will take any rate, so the block's choice stands as asked.
+        SetFormat(f.inRate, f.rateHz);
+        const int rate = m_rate;
+        const int kbps = f.kbps;
 
         vorbis_info_init(&m_vi);
         // Managed to a nominal bitrate rather than a quality setting, so the
@@ -235,23 +264,16 @@ class OpusRecorder : public OggWriterBase
 public:
     ~OpusRecorder() override { Stop(); Release(); }
 
-    bool Start(const std::wstring& path, int rate, int kbps, std::wstring* err) override
+    bool Start(const std::wstring& path, const RecordFormat& f,
+               std::wstring* err) override
     {
         if (!OpenFile(path, err)) return false;
-        m_rate = rate;
-
-        if (rate != kOpusRate)
-        {
-            int rc = 0;
-            m_res = speex_resampler_init((spx_uint32_t)kChannels, (spx_uint32_t)rate,
-                                         (spx_uint32_t)kOpusRate, 5, &rc);
-            if (!m_res)
-            {
-                if (err) *err = FormatW(L"%d Hz could not be converted to the "
-                                        L"48000 Hz Opus works at.", rate);
-                return false;
-            }
-        }
+        // Opus is a 48 kHz format: whatever it is handed ends up at 48 kHz in
+        // the file, and the block's sample rate setting has nothing to decide.
+        // Converting in the base class rather than here means one conversion
+        // instead of two whenever the session is not already at 48 kHz.
+        SetFormat(f.inRate, kOpusRate);
+        const int kbps = f.kbps;
 
         int rc = 0;
         m_enc = opus_encoder_create(kOpusRate, kChannels, OPUS_APPLICATION_AUDIO, &rc);
@@ -282,25 +304,13 @@ public:
     }
 
 protected:
+    // Already at 48 kHz: the base class converted on its way here, so there
+    // is nothing left to do but gather whole frames for the encoder.
     void Encode(const float* buf, size_t frames) override
     {
         if (!m_enc || frames == 0) return;
 
-        const float* src = buf;
-        size_t n = frames;
-        if (m_res)
-        {
-            size_t room = (size_t)((double)frames * kOpusRate / m_rate) + 64;
-            m_resampled.resize(room * kChannels);
-            spx_uint32_t inLen = (spx_uint32_t)frames;
-            spx_uint32_t outLen = (spx_uint32_t)room;
-            speex_resampler_process_interleaved_float(m_res, buf, &inLen,
-                                                      m_resampled.data(), &outLen);
-            src = m_resampled.data();
-            n = outLen;
-        }
-
-        m_block.insert(m_block.end(), src, src + n * kChannels);
+        m_block.insert(m_block.end(), buf, buf + frames * kChannels);
         while (m_block.size() >= (size_t)kFrameSamples * kChannels)
         {
             EncodeOneFrame(m_block.data());
@@ -353,7 +363,10 @@ private:
         head.push_back(1);                       // version
         head.push_back((unsigned char)kChannels);
         Put16(head, (unsigned)m_preSkip);
-        Put32(head, (unsigned)m_rate);           // the original rate, for information
+        // Opus calls this the input sample rate: what the audio was before
+        // the encoder got it, which is the session's rate and not the 48 kHz
+        // in the pages below.
+        Put32(head, (unsigned)m_inRate);
         Put16(head, 0);                          // output gain
         head.push_back(0);                       // channel mapping family 0
 
@@ -410,22 +423,38 @@ private:
     void Release()
     {
         if (m_enc) { opus_encoder_destroy(m_enc); m_enc = nullptr; }
-        if (m_res) { speex_resampler_destroy(m_res); m_res = nullptr; }
         if (m_osUp) { ogg_stream_clear(&m_os); m_osUp = false; }
     }
 
     ::OpusEncoder* m_enc = nullptr;
-    SpeexResamplerState* m_res = nullptr;
     ogg_stream_state m_os{};
     bool m_osUp = false;
     int m_preSkip = 0;
     long long m_granule = 0;
     long long m_packetNo = 0;
-    std::vector<float> m_block, m_resampled;
+    std::vector<float> m_block;
     std::vector<unsigned char> m_packet;
 };
 
 }   // namespace
+
+// Whether libvorbis will set up for a rate and bitrate together.
+//
+// Worth asking rather than tabulating. The answer is not obvious and not
+// symmetric: this build takes 96 to 320 kbps at 44100 and 48000, stops at
+// 160 kbps by 22050, and refuses every bitrate at all above 48000 - so a
+// recorder offering "any rate" for Ogg Vorbis would be offering four rates
+// that cannot be written. Nothing is encoded to find out; the configuration
+// is set up and thrown away.
+bool VorbisAccepts(int rate, int kbps)
+{
+    if (rate <= 0 || kbps <= 0) return false;
+    vorbis_info vi;
+    vorbis_info_init(&vi);
+    const int rc = vorbis_encode_init(&vi, kChannels, rate, -1, kbps * 1000, -1);
+    vorbis_info_clear(&vi);
+    return rc == 0;
+}
 
 std::unique_ptr<Recorder> MakeVorbisRecorder()
 {

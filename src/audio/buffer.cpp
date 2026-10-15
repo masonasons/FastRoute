@@ -229,8 +229,13 @@ private:
         std::wstring err;
         std::wstring path = ResolveRecordingPath(set.folder, set.nameTemplate,
                                                  set.sessionName, set.fmt);
+        // The same resolving the recorder block does, so a buffer saved in a
+        // format gets the rate and depth its dialog offered rather than the
+        // session's.
+        const RecordFormat rf = RecFileFormatFor(set.fmt, set.rateHz, set.bits,
+                                                 set.kbps, m_rate);
         std::unique_ptr<Recorder> rec = MakeRecorder(set.fmt);
-        if (!rec || !rec->Start(path, m_rate, set.kbps, &err))
+        if (!rec || !rec->Start(path, rf, &err))
         {
             LogError(err.empty() ? L"The buffer could not be saved." : err);
             m_saving.store(false);
