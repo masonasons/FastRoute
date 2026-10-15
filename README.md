@@ -1145,6 +1145,63 @@ long each has been going. Both update once a second, and only when the text has
 actually changed, so nothing is announced twice a second for saying the same
 thing.
 
+## When devices disagree about rate or bit depth
+
+They are made to agree, and nothing in the session has to be told about it.
+
+Inside FastRoute every sample is **32-bit float, stereo**, at one rate for the
+whole session: **the first output block's own rate**, read from that endpoint's
+mix format. That block is the master clock, so it is the one endpoint that
+needs no conversion at all.
+
+Everything else is converted at its edge:
+
+* **Bit depth never reaches the mix.** Every endpoint, in or out, is opened
+  asking for float32, and Windows converts the device's own 16, 24 or 32-bit
+  samples on the way through. There is nothing to configure and nothing to get
+  wrong: a 16-bit microphone and a 24-bit interface in one session are both
+  float by the time a block sees them.
+* **Sample rate is converted at every endpoint but the master.** A 44.1 kHz
+  microphone in a session whose output runs at 48 kHz is resampled by Windows
+  into 48 kHz; a second output running at 44.1 kHz is resampled back down on
+  the way out. The session stays at one rate throughout, so no block ever sees
+  two rates at once.
+* **Reordering the blocks can change the rate.** The master is whichever output
+  block comes first, so moving a 96 kHz interface above a 48 kHz one re-runs
+  the whole graph at 96 kHz. The session window says which rate it is actually
+  running at, and that is worth a look if a session sounds different after a
+  reorder.
+
+The session window's status line reads *Running at 48000 Hz* - the real figure,
+not the setting - so you can always check what you got.
+
+### Matching rates is still worth doing
+
+Converting is not free, and two kinds of cost are worth knowing about.
+
+The first is quality, and it is small: one resampling pass at the edge of the
+graph, in Windows' own converter.
+
+The second is more interesting. **Two devices never run at exactly the same
+rate even when they agree on paper.** A USB microphone's 48 kHz is its own
+crystal's 48 kHz, not the motherboard's, and the two drift apart by a fraction
+of a percent - which is enough to overflow or starve a buffer over a few
+minutes. FastRoute handles this by resampling continuously by the ratio it
+*measures* between frames in and frames out, rather than by the rate either
+device claims, so drift is absorbed instead of accumulating into a dropout.
+That machinery runs whether or not the nominal rates match, and the status line
+reports it as *Input resampled 1.002x* when it is doing anything appreciable.
+
+So: mismatched rates work, matched rates work slightly better, and either way
+the thing to watch is the dropout count rather than the numbers on the
+hardware.
+
+### Recording is the one place you choose
+
+A recorder block can be set to a rate and bit depth of its own, independent of
+whatever the session is running at - see **Rate and bit depth** under
+Recording.
+
 ## Recording
 
 A Recorder is an output block, so it captures the bus exactly where it sits in
@@ -1408,8 +1465,10 @@ involved.
   (`ActivateAudioInterfaceAsync` with `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`),
   which needs Windows 10 2004 or newer.
 * Device blocks open shared-mode clients with `AUTOCONVERTPCM`, so Windows
-  handles sample-rate and channel conversion into the internal format
-  (48 kHz, stereo, float32).
+  handles sample-rate, channel and bit-depth conversion into the internal
+  format: stereo float32 at the master output's rate. Bit depth therefore
+  never reaches the mix at all, and a session can mix a 16-bit microphone with
+  a 24-bit interface without being told about it.
 * **The first output block owns the clock.** Its renderer calls the mixer
   directly from its own WASAPI event, so the graph runs at exactly the rate the
   sound card consumes and nothing is buffered between the mix and the endpoint.
