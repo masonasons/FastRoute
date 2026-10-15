@@ -366,7 +366,10 @@ bool Engine::ApplySession(const Session& s, std::wstring* err, bool* graphIntact
             if (b.recMode != RM_TRACKS)
             {
                 n->rec.reset(new RecordSink());
-                if (!n->rec->Start(RecordSettingsFor(b, s.name), m_rate, err)) return false;
+                if (!n->rec->Start(RecordSettingsFor(b, s.name, (int)i + 1,
+                                                     (int)count),
+                                   m_rate, err))
+                    return false;
             }
         }
         created[i] = std::move(n);
@@ -409,7 +412,10 @@ bool Engine::ApplySession(const Session& s, std::wstring* err, bool* graphIntact
                 continue;                       // already writing the right file
 
             std::unique_ptr<RecordSink> sink(new RecordSink());
-            if (!sink->Start(TrackSettingsFor(*asked, s.name, trackName[i]),
+            // The input block's own number, not the recorder's: this file is
+            // of that block, and that is what {index} has to say.
+            if (!sink->Start(TrackSettingsFor(*asked, s.name, trackName[i],
+                                              (int)i + 1, (int)count),
                              m_rate, err))
                 return false;
             newTracks[i] = std::move(sink);
@@ -472,14 +478,17 @@ bool Engine::ApplySession(const Session& s, std::wstring* err, bool* graphIntact
                 // answer a Recorder block in this session would get - with
                 // {block} filled in, since for a buffer there is exactly one
                 // block the file is of and it is this one.
-                RecordSettings rs = RecordSettingsFor(s.blocks[i], s.name);
+                RecordSettings rs = RecordSettingsFor(s.blocks[i], s.name,
+                                                      (int)i + 1, (int)count);
                 rs.blockName = s.blocks[i].TypeName();
                 next[i]->fx->ConfigureRecording(rs);
             }
             if (next[i]->capture) next[i]->capture->Configure(s.blocks[i]);
             // The gate and the splitting are live: they do not decide which
             // file is open, so changing them must not start a new one.
-            if (next[i]->rec) next[i]->rec->Configure(RecordSettingsFor(s.blocks[i], s.name));
+            if (next[i]->rec)
+                next[i]->rec->Configure(RecordSettingsFor(s.blocks[i], s.name,
+                                                          (int)i + 1, (int)count));
             if (next[i]->net) next[i]->net->Configure(s.blocks[i]);
 
             // A track that is no longer wanted, or is wanted in a different

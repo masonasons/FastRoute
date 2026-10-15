@@ -576,8 +576,8 @@ struct Block
 
     // output.recorder
     std::wstring folder;        // "" == Music\FastRoute
-    std::wstring nameTemplate;  // supports {session} {block} {date} {time}
-                                // {datetime} {n}
+    std::wstring nameTemplate;  // supports {session} {block} {index} {date}
+                                // {time} {datetime} {n}
     int recFormat = 0;          // 0 wav, 1 flac, 2 mp3
     int bitrateKbps = 192;
     int recMode = RM_MIXED;     // the mix, a file per input block, or both

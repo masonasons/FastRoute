@@ -1319,8 +1319,10 @@ static INT_PTR CALLBACK RecorderDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
         SetWindowLongPtrW(dlg, DWLP_USER, lp);
 
         FillFileFields(dlg, b,
-                       L"Use {session}, {block}, {date}, {time}, {datetime} and "
-                       L"{n}. Leave the folder blank for your Music folder.");
+                       L"Use {session}, {block}, {index}, {date}, {time}, "
+                       L"{datetime} and {n}. {index} is the block's place in "
+                       L"the pipeline. Leave the folder blank for your Music "
+                       L"folder.");
 
         {
             HWND mc = GetDlgItem(dlg, IDC_REC_MODE);
@@ -2240,8 +2242,10 @@ static INT_PTR CALLBACK BufferDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                    kBufStepMin, kBufStepMax, b->bufStepSec, L" s", 5);
 
         FillFileFields(dlg, b,
-                       L"Use {session}, {block}, {date}, {time}, {datetime} and "
-                       L"{n}. Leave the folder blank for your Music folder.");
+                       L"Use {session}, {block}, {index}, {date}, {time}, "
+                       L"{datetime} and {n}. {index} is the block's place in "
+                       L"the pipeline. Leave the folder blank for your Music "
+                       L"folder.");
         CheckDlgButton(dlg, IDC_BLOCK_ENABLED, b->enabled ? BST_CHECKED : BST_UNCHECKED);
         SyncBufferFields(dlg, b);
         return TRUE;

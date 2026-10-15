@@ -87,7 +87,8 @@ std::wstring ResolveRecordingPath(const std::wstring& folder,
                                   const std::wstring& nameTemplate,
                                   const std::wstring& sessionName,
                                   RecFormat fmt,
-                                  const std::wstring& blockName)
+                                  const std::wstring& blockName,
+                                  int blockIndex, int blockCount)
 {
     SYSTEMTIME t;
     GetLocalTime(&t);
@@ -95,10 +96,24 @@ std::wstring ResolveRecordingPath(const std::wstring& folder,
     std::wstring date = FormatW(L"%04d-%02d-%02d", t.wYear, t.wMonth, t.wDay);
     std::wstring time = FormatW(L"%02d-%02d-%02d", t.wHour, t.wMinute, t.wSecond);
 
+    // Padded to the width the session needs rather than to a fixed two, so a
+    // session of three blocks is "1. Mic" and not "01. Mic", while one of
+    // twelve still sorts 09 before 10 instead of 10 before 9.
+    std::wstring index;
+    if (blockIndex > 0)
+    {
+        int width = 1;
+        for (int n = blockCount; n >= 10; n /= 10) ++width;
+        index = FormatW(L"%0*d", width, blockIndex);
+    }
+
     std::wstring name = nameTemplate.empty() ? std::wstring(L"{session} {date} {time}")
                                              : nameTemplate;
     ReplaceAll(name, L"{session}",  sessionName);
     ReplaceAll(name, L"{block}",    blockName);
+    ReplaceAll(name, L"{index}",    index);
+    // The name this was asked for by, kept working alongside the shorter one.
+    ReplaceAll(name, L"{blocknumber}", index);
     ReplaceAll(name, L"{date}",     date);
     ReplaceAll(name, L"{time}",     time);
     ReplaceAll(name, L"{datetime}", date + L" " + time);
@@ -838,12 +853,15 @@ RecordFormat RecFileFormatFor(RecFormat fmt, int rateHz, int bits, int kbps,
 // Recorder block output: silence gate and file splitting
 // ---------------------------------------------------------------------------
 
-RecordSettings RecordSettingsFor(const Block& b, const std::wstring& sessionName)
+RecordSettings RecordSettingsFor(const Block& b, const std::wstring& sessionName,
+                                 int blockIndex, int blockCount)
 {
     RecordSettings s;
     s.folder = b.folder;
     s.nameTemplate = b.nameTemplate;
     s.sessionName = sessionName;
+    s.blockIndex = blockIndex;
+    s.blockCount = blockCount;
     // Against kRecFormatCount, not against 2. It was 2 when WAV, FLAC and MP3
     // were the only formats, and it stayed 2 when AAC, Ogg Vorbis and Opus
     // were added - so choosing one of those three silently recorded a WAV
@@ -875,9 +893,11 @@ RecordSettings RecordSettingsFor(const Block& b, const std::wstring& sessionName
 //    the same number of frames for everyone, so that one is kept.
 RecordSettings TrackSettingsFor(const Block& recorderBlock,
                                 const std::wstring& sessionName,
-                                const std::wstring& blockName)
+                                const std::wstring& blockName,
+                                int blockIndex, int blockCount)
 {
-    RecordSettings s = RecordSettingsFor(recorderBlock, sessionName);
+    RecordSettings s = RecordSettingsFor(recorderBlock, sessionName,
+                                         blockIndex, blockCount);
     s.blockName = blockName;
     s.skipSilence = false;
     if (s.splitMode == 2) s.splitMode = 0;
@@ -885,8 +905,11 @@ RecordSettings TrackSettingsFor(const Block& recorderBlock,
     // Every track needs a name of its own. A template that does not say which
     // block the file is of gets told, because otherwise all of them resolve to
     // the same name and the collision escape hatch numbers them in whatever
-    // order they happened to open.
-    if (s.nameTemplate.find(L"{block}") == std::wstring::npos)
+    // order they happened to open. A template naming the block's number
+    // instead is already distinct, so that counts.
+    if (s.nameTemplate.find(L"{block}") == std::wstring::npos &&
+        s.nameTemplate.find(L"{index}") == std::wstring::npos &&
+        s.nameTemplate.find(L"{blocknumber}") == std::wstring::npos)
     {
         if (s.nameTemplate.empty()) s.nameTemplate = L"{session} {date} {time}";
         s.nameTemplate += L" - {block}";
@@ -1021,7 +1044,8 @@ bool RecordSink::Open(std::wstring* err)
     }
 
     std::wstring path = ResolveRecordingPath(s.folder, s.nameTemplate, s.sessionName,
-                                            s.fmt, s.blockName);
+                                            s.fmt, s.blockName,
+                                            s.blockIndex, s.blockCount);
 
     const RecordFormat rf = RecFileFormatFor(s.fmt, s.rateHz, s.bits, s.kbps, m_rate);
     std::unique_ptr<Recorder> r = MakeRecorder(s.fmt);

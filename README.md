@@ -1218,12 +1218,18 @@ cleaned signal from the same session.
   offered and then refused. The bitrate applies to the four lossy formats.
 * **Sample rate and bit depth** can be set per block, or left to follow the
   session and the format - see **Rate and bit depth** below.
-* **File name templates** expand `{session}`, `{block}`, `{date}`, `{time}`,
-  `{datetime}` and `{n}`, and the extension is added automatically. `{block}`
-  is empty for a recorder's own mixed file, there being no one block it is of;
-  it is the point of the thing for the per-block files below. An existing file is
-  never overwritten: `{n}` becomes the next free number, and without it a
-  ` (2)` suffix is appended.
+* **File name templates** expand `{session}`, `{block}`, `{index}`, `{date}`,
+  `{time}`, `{datetime}` and `{n}`. `{index}` is the block's place in the
+  pipeline, counted from one - so `{index}. {block}` writes `1. Mic.flac`,
+  `2. Screen reader.flac`, `3. Game.flac`, and the files sort into the order
+  the blocks are in. It is padded to the width the session needs, so a session
+  of twelve blocks numbers them `01` to `12` and the ninth still sorts before
+  the tenth. `{blocknumber}` is accepted as the same thing. A recorder's own
+  mixed file is of no one block, so `{block}` and `{index}` are both empty
+  there; for the per-block files below they are the point of the thing. An
+  existing file is never overwritten: `{n}` becomes the next free number, and
+  without it a ` (2)` suffix is appended. The extension is added
+  automatically.
 * Leaving the folder blank records into `Music\FastRoute`.
 * **Ctrl+Shift+O** opens the recording folder in Explorer, from either window.
   In the session window a selected Recorder block wins, so a session with more

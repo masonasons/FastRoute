@@ -228,7 +228,9 @@ private:
         m_saving.store(true);
         std::wstring err;
         std::wstring path = ResolveRecordingPath(set.folder, set.nameTemplate,
-                                                 set.sessionName, set.fmt);
+                                                 set.sessionName, set.fmt,
+                                                 set.blockName, set.blockIndex,
+                                                 set.blockCount);
         // The same resolving the recorder block does, so a buffer saved in a
         // format gets the rate and depth its dialog offered rather than the
         // session's.

@@ -614,15 +614,22 @@ std::unique_ptr<Recorder> MakeOpusRecorder();
 // FLAC encoder MFT and an MP3 one; older releases ship neither, so the format
 // is dropped from the recorder block rather than failing when you press run.
 bool RecFormatAvailable(RecFormat fmt);
-// Expands {session}, {block}, {date}, {time}, {datetime} and {n} and appends
-// the extension for `fmt`, avoiding a name that already exists. {block} comes
-// out empty when there is no one block the file is of, which is the ordinary
-// case: a recorder's mixed file is of the whole bus.
+// Expands {session}, {block}, {index}, {date}, {time}, {datetime} and {n} and
+// appends the extension for `fmt`, avoiding a name that already exists.
+// {block} comes out empty when there is no one block the file is of, which is
+// the ordinary case: a recorder's mixed file is of the whole bus.
+//
+// {index} is `blockIndex`, which is a block's place in the session counted
+// from one, zero-padded to the width `blockCount` needs - so a session of
+// nine blocks or fewer numbers them 1 to 9 and one of twelve numbers them 01
+// to 12, and either way the files sort into pipeline order. Zero leaves it
+// empty, like an absent {block}.
 std::wstring ResolveRecordingPath(const std::wstring& folder,
                                   const std::wstring& nameTemplate,
                                   const std::wstring& sessionName,
                                   RecFormat fmt,
-                                  const std::wstring& blockName = std::wstring());
+                                  const std::wstring& blockName = std::wstring(),
+                                  int blockIndex = 0, int blockCount = 0);
 const wchar_t* RecFormatExt(RecFormat fmt);
 
 // Everything a recorder block is set to. The first four decide which file is
@@ -636,6 +643,10 @@ struct RecordSettings
     // Which block this file is of, for {block}. Empty for a recorder's own
     // mixed file: there is no one block it is of.
     std::wstring blockName;
+    // That block's place in the session, counted from one, and how many
+    // blocks there are - which together are {index}. Zero for neither known.
+    int  blockIndex = 0;
+    int  blockCount = 0;
     RecFormat fmt = RecFormat::Wav;
     int  kbps = 192;
     int  rateHz = 0;            // 0 == the rate the session is running at
@@ -650,14 +661,18 @@ struct RecordSettings
     int  splitMb = 100;
 };
 
-RecordSettings RecordSettingsFor(const Block& b, const std::wstring& sessionName);
+RecordSettings RecordSettingsFor(const Block& b, const std::wstring& sessionName,
+                                 int blockIndex = 0, int blockCount = 0);
 // The same, for one input block's own file, from the recorder block that asked
 // for it. Separate tracks are worth having because they line up, so the two
 // settings that would cut each file at a different moment - the silence gate,
 // and splitting by size - are not passed on. See TrackSettingsFor.
+// `blockIndex` is the input block's own place in the session, not the
+// recorder's: the file is of that block, so that is what {index} must mean.
 RecordSettings TrackSettingsFor(const Block& recorderBlock,
                                 const std::wstring& sessionName,
-                                const std::wstring& blockName);
+                                const std::wstring& blockName,
+                                int blockIndex = 0, int blockCount = 0);
 
 // ---------------------------------------------------------------------------
 // One recorder block's output: the file being written, plus the silence gate
