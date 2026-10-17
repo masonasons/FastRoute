@@ -20,6 +20,12 @@
 static const int kChannels     = 2;
 static const int kDefaultRate  = 48000;
 
+// The largest block the graph will ever be asked for in one call. The render
+// size follows the master output endpoint's buffer, which is a thousand frames
+// or so; this is generous enough that the chunking loop inside the plugin
+// hosts effectively never runs, and small enough to be a trivial allocation.
+static const int kMaxRenderBlock = 4096;
+
 // Latency budget. The mixer is clocked by the master output endpoint, so a
 // capture ring only ever holds the jitter between that clock and the capture
 // device's own. The prime is the cushion we start with; the backlog ceiling is
@@ -372,6 +378,147 @@ std::unique_ptr<NetSink> MakeNetSink();
 // Whether Media Foundation is on this machine at all. It is delay loaded, so
 // nothing may touch it until this says so.
 bool MediaFoundationAvailable();
+
+// ---------------------------------------------------------------------------
+// How deep to hold a render endpoint
+//
+// The endpoint is refilled from an event that fires once per engine period,
+// and it plays out a period's worth between two of those events. So what has
+// to be standing in it when the event arrives is one period for the playing
+// out, plus however long producing the next period actually takes.
+//
+// That second part is the whole question, and it is not one number. An input
+// wired straight to an output costs almost nothing. A session with plugins in
+// it costs most of the budget, because a plugin is arbitrary code running on
+// the audio thread and the graph is not finished until it returns. One figure
+// guessed for both gives you a session that either crackles or is needlessly
+// late, so this measures instead: it keeps the worst production cost seen over
+// the last second or two and asks for exactly that much headroom. Putting a
+// plugin in deepens the buffer, taking it out gives the depth back, and a
+// session without one keeps the latency it has always had.
+//
+// Kept apart from the WASAPI loop because the arithmetic is the part that was
+// wrong, and arithmetic can be checked without a sound card.
+// ---------------------------------------------------------------------------
+class FillPolicy
+{
+public:
+    void Begin(unsigned period, unsigned bufferFrames)
+    {
+        m_period = period;
+        m_buffer = bufferFrames;
+        m_floor  = period / 2;
+        m_cur = m_prev = 0;
+        m_ticks = 0;
+        // An endpoint that reports no period at all gives no basis for holding
+        // less than the whole buffer, so it gets the whole buffer and the
+        // measurement is left out of it entirely.
+        m_target = period ? Clamp(period + m_floor) : bufferFrames;
+    }
+
+    unsigned Target() const { return m_target; }
+
+    // How much to write now. This fills towards the target rather than to the
+    // endpoint's capacity, because the rest of the WASAPI buffer is latency we
+    // are choosing not to pay for.
+    //
+    // The cap used to be one period, which is exactly the amount that cannot
+    // work: a period written against a period played out leaves the depth
+    // where it was, so the depth was a fixed point. An endpoint that had once
+    // run dry could never be filled again - it sat at one period with no slack
+    // at all, every block after the first dropout was a race it lost, and one
+    // hiccup became crackling for the rest of the session. Deepening the
+    // target could not help either, because the target was a figure the writes
+    // were never allowed to reach.
+    //
+    // A period and a half is the cap instead. It is more than a period, so the
+    // depth climbs back by half a period a time and a dropout costs a few
+    // milliseconds rather than the session; and it is only half a period more
+    // than the steady state, so catching up asks the capture rings for a
+    // little more than usual instead of swallowing one whole.
+    unsigned WriteNow(unsigned padding) const
+    {
+        if (padding >= m_target || padding >= m_buffer) return 0;
+        unsigned want = m_target - padding;
+        const unsigned most = m_period + m_period / 2;
+        if (most && want > most) want = most;
+        const unsigned room = m_buffer - padding;
+        return want < room ? want : room;
+    }
+
+    // One measured production, as frames at the session rate, already scaled
+    // to what a period's worth of work would have cost.
+    void NoteCost(unsigned costFrames)
+    {
+        if (costFrames > m_cur) m_cur = costFrames;
+    }
+
+    // The endpoint was found empty, which is a dropout that was heard. The
+    // cost measurement cannot see every reason for one - being late to the
+    // event at all does not show up as time spent producing - so this says
+    // plainly that whatever the graph costs, it did not fit in the slack it
+    // had, and asks for a quarter period more than it had.
+    void NoteDry()
+    {
+        const unsigned slack = m_target > m_period ? m_target - m_period : 0;
+        const unsigned want  = slack + (m_period ? m_period / 4 : 1);
+        const unsigned cost  = want / 2;        // Tick doubles it again
+        if (cost > m_cur) m_cur = cost;
+    }
+
+    // Once per wake. Rolls the measurement window on and walks the target
+    // towards what the measurement is asking for.
+    void Tick()
+    {
+        if (m_period == 0) return;      // nothing to measure against
+
+        if (++m_ticks >= kWindowTicks)
+        {
+            m_prev = m_cur;
+            m_cur = 0;
+            m_ticks = 0;
+        }
+
+        const unsigned worst = m_cur > m_prev ? m_cur : m_prev;
+        // Twice the worst seen, because the worst that has not happened yet is
+        // worse than the worst that has, and a few milliseconds of headroom
+        // costs less than one dropout.
+        unsigned need = worst * 2;
+        if (need < m_floor) need = m_floor;
+        const unsigned want = Clamp(m_period + need);
+
+        // Up in quarter periods and down in sixteenths: deepening is what
+        // stops a dropout, and shallowing is only ever a convenience, so it
+        // should not be the thing that causes one.
+        if (want > m_target)
+            m_target += Step(want - m_target, m_period / 4);
+        else if (want < m_target)
+            m_target -= Step(m_target - want, m_period / 16);
+    }
+
+private:
+    static unsigned Step(unsigned by, unsigned most)
+    {
+        if (most == 0) return by;
+        return by < most ? by : most;
+    }
+
+    unsigned Clamp(unsigned v) const
+    {
+        return (m_buffer && v > m_buffer) ? m_buffer : v;
+    }
+
+    // Roughly a second a bucket at any ordinary period, so the maximum is over
+    // one to two seconds: long enough that a plugin's occasional expensive
+    // block still counts, short enough that taking the plugin out gives the
+    // latency back while you are still looking at the session window.
+    static const unsigned kWindowTicks = 100;
+
+    unsigned m_period = 0, m_buffer = 0, m_floor = 0;
+    unsigned m_target = 0;
+    unsigned m_cur = 0, m_prev = 0;    // two bucket decaying maximum
+    unsigned m_ticks = 0;
+};
 
 // ---------------------------------------------------------------------------
 // Renderer

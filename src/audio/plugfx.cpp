@@ -20,12 +20,6 @@
 
 namespace {
 
-// The largest buffer the engine will ever hand over in one call. The render
-// size follows the output endpoint's period, which is a few hundred frames;
-// this is generous enough that the chunking loop inside the plugin hosts
-// effectively never runs, and small enough to be a trivial allocation.
-static const int kMaxBlock = 4096;
-
 class PluginFx : public Effect
 {
 public:
@@ -64,7 +58,7 @@ public:
                                  why.c_str()));
                 return;
             }
-            if (!m_plugin->Start(m_rate, kMaxBlock, &why))
+            if (!m_plugin->Start(m_rate, kMaxRenderBlock, &why))
             {
                 LogError(FormatW(L"%s would not start, so that block is doing "
                                  L"nothing. %s", d.name.c_str(), why.c_str()));

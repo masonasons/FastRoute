@@ -1210,11 +1210,13 @@ void DeviceRenderer::ThreadMain()
 
     // WASAPI hands out a buffer noticeably larger than one engine period
     // (1056 frames against a 480 frame period is typical). Keeping it brimming
-    // would make every one of those frames latency, so instead we hold it at
-    // one period plus half a period of slack and leave the rest unused.
-    UINT32 period = m_periodFrames.load();
-    UINT32 target = period ? (period + period / 2) : bufferFrames;
-    if (target > bufferFrames) target = bufferFrames;
+    // would make every one of those frames latency, so FillPolicy holds only
+    // as much of it as this graph has actually been measured to need, starting
+    // at the period and a half that used to be the fixed figure.
+    const UINT32 period = m_periodFrames.load();
+    FillPolicy fill;
+    fill.Begin(period, bufferFrames);
+    const UINT32 target = fill.Target();
     m_bufferFrames.store(target);
 
     // Prime with exactly that much silence so the first event does not glitch.
@@ -1237,6 +1239,12 @@ void DeviceRenderer::ThreadMain()
         HANDLE mm = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
         bool firstEvent = true;
 
+        // For costing the graph. A frequency of zero would mean no timer at
+        // all, in which case the policy simply never hears a cost and holds
+        // its floor, which is what this did before any of it was measured.
+        LARGE_INTEGER qpf{};
+        if (!QueryPerformanceFrequency(&qpf)) qpf.QuadPart = 0;
+
         while (!m_stop.load())
         {
             if (WaitForSingleObject(evt, 200) != WAIT_OBJECT_0) continue;
@@ -1245,36 +1253,45 @@ void DeviceRenderer::ThreadMain()
             UINT32 padding = 0;
             if (FAILED(client->GetCurrentPadding(&padding))) break;
 
-            // The endpoint ran dry before we got here, so the fill target is
-            // too tight for this machine. Give it another quarter period and
-            // let it settle wherever it can actually be sustained, rather than
-            // glitching at a figure that only looks good on paper.
-            if (padding == 0 && !firstEvent && period && target < bufferFrames)
-            {
-                target += period / 4;
-                if (target > bufferFrames) target = bufferFrames;
-                m_bufferFrames.store(target);
-            }
+            // The endpoint ran dry before we got here: a dropout somebody
+            // heard. Told to the policy directly, because not every reason for
+            // one shows up as time spent producing - being late to the event
+            // at all does not - and because it is the only evidence that the
+            // measurement has missed something.
+            if (padding == 0 && !firstEvent) fill.NoteDry();
             firstEvent = false;
 
-            if (padding >= target) continue;          // already at the fill target
-
-            UINT32 avail = target - padding;
-            if (avail > bufferFrames - padding) avail = bufferFrames - padding;
-            // Never pull more than one period at a time. Each pull has to be
-            // sitting in the capture rings before it can be served, so a big
-            // pull is a big standing backlog on the input side.
-            if (period && avail > period) avail = period;
-            if (avail == 0) continue;
+            fill.Tick();
+            const UINT32 want = fill.WriteNow(padding);
+            m_bufferFrames.store(fill.Target());
+            if (want == 0) continue;                  // already at the target
 
             BYTE* data = nullptr;
-            if (FAILED(render->GetBuffer(avail, &data))) break;
+            if (FAILED(render->GetBuffer(want, &data))) break;
+
+            LARGE_INTEGER t0{}, t1{};
+            QueryPerformanceCounter(&t0);
 
             float* dst = reinterpret_cast<float*>(data);
-            if (m_source) m_source(dst, avail);          // master clock
-            else          m_ring.Read(dst, avail);
+            if (m_source) m_source(dst, want);           // master clock
+            else          m_ring.Read(dst, want);
 
-            render->ReleaseBuffer(avail, 0);
+            QueryPerformanceCounter(&t1);
+            render->ReleaseBuffer(want, 0);
+
+            // What that cost, in frames at this rate, scaled to what a whole
+            // period would have cost. A write much smaller than a period is
+            // mostly fixed overhead and would scale up into nonsense, so it is
+            // left out rather than guessed at.
+            if (period && qpf.QuadPart && want >= period / 2)
+            {
+                const double secs = (double)(t1.QuadPart - t0.QuadPart) /
+                                    (double)qpf.QuadPart;
+                const double cost = secs * (double)m_rate *
+                                    (double)period / (double)want;
+                if (cost > 0.0)
+                    fill.NoteCost(cost < 1.0e9 ? (unsigned)cost : (unsigned)1.0e9);
+            }
         }
 
         client->Stop();

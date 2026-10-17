@@ -1624,9 +1624,8 @@ involved.
 * **The output buffer is deliberately not kept full.** WASAPI hands out a
   buffer well over one engine period (1056 frames against a 480 frame period is
   typical); topping it up every event would make all of it latency. It is held
-  at one period plus half instead, and each pull is capped at one period,
-  because whatever the mixer pulls in one go has to be sitting in the capture
-  rings first.
+  at one period plus the headroom this graph has actually been *measured* to
+  need - see **Latency, and what sets it** below.
 * **Capture rings are flushed on the first pull.** Opening the output client
   takes milliseconds during which the already-running captures bank audio.
   Left alone that startup backlog sits in the FIFO for the rest of the session
@@ -1665,9 +1664,14 @@ involved.
   where no packet happened to arrive biases the estimate upwards by exactly the
   reads it discarded, and the converter then pitch shifts the whole session by
   several percent, wandering as the estimate wanders. The applied ratio is also
-  clamped to five percent, because a device claiming 48 kHz is not really
-  running further out than that, and resampling that far is worse than the
-  drift it corrects.
+  clamped to a quarter of one percent - about four cents, which is below
+  hearing it as a pitch at all. Real crystals differ by tens of parts per
+  million, so that is already twenty times more authority than drift needs. It
+  used to be allowed five percent, which is most of a semitone, and that is
+  what the pitch wander turned out to be: on a packetised source the buffer
+  depth moves by a packet all the time, and the correction rode it. The buffer
+  is what absorbs jitter; the resampler is only for drift, and it should be too
+  slow and too weak to be noticed doing it.
 * **The converter is latched off until an input proves it needs one.** At a
   ratio of exactly 1.0 with no accumulated fraction the interpolator (Catmull-
   Rom) is bit-for-bit passthrough, so a well-behaved input is left completely
@@ -1692,9 +1696,63 @@ dropout count whenever the stream has actually been discontinuous - discarded
 at a ring ceiling, or zero-filled because a capture ran dry. Anything other
 than zero there is audible, so it is worth watching if a device misbehaves.
 
-If the output endpoint ever runs dry, the fill target widens by a quarter
-period and settles wherever the machine can actually sustain it, so an
-aggressive default degrades into a working one rather than a glitching one.
+### Latency, and what sets it
+
+The output endpoint is refilled from an event that fires once per engine
+period, and it plays out a period's worth between two of those events. So what
+has to be standing in it when the event arrives is one period for the playing
+out, plus however long producing the next period actually takes.
+
+That second part is not one number, and that is the whole point. An input wired
+straight to an output costs almost nothing. A session with plugins in it costs
+most of the budget, because a plugin is arbitrary code running on the audio
+thread and the graph is not finished until it returns. One figure guessed for
+both gives you a session that either crackles or is needlessly late.
+
+So it is measured. Every pull is timed, and the endpoint is held at one period
+plus twice the worst production cost seen over the last second or two, with a
+floor of half a period - which is the fixed figure it used to be. In practice:
+
+* An input, a gain block and an output: nothing changes. The cost is tens of
+  microseconds, the floor wins, and the latency is what it always was.
+* A plugin chain costing four milliseconds a block: the buffer deepens by
+  about three milliseconds, before anything is heard, and stays there.
+* Remove the plugin and the depth comes back down within a second or two.
+
+Twice the measured cost rather than exactly it, because the worst block that
+has not happened yet is worse than the worst that has, and a few milliseconds
+of headroom costs less than one dropout.
+
+If the endpoint is found empty anyway - a dropout somebody heard - that is
+reported to the same mechanism directly, since not every reason for one shows
+up as time spent producing. Being late to the event at all does not.
+
+### Why one dropout used to become crackling for the rest of the session
+
+Each refill used to be capped at one engine period, on the reasoning that
+whatever the mixer pulls in one go has to be sitting in the capture rings
+first. One period is exactly the amount that cannot work.
+
+A period written against a period played out leaves the depth exactly where it
+was, so the depth was a fixed point: it could fall but never climb. An endpoint
+that had once run dry sat at one period with **no slack at all** from then on,
+which means every block after the first dropout was a race it lost. One hiccup
+became crackling for the rest of the session, and deepening the fill target
+could not help, because the target was a figure the writes were never allowed
+to reach.
+
+This is why it showed up with plugins in the chain and with stream blocks:
+neither of them is the fault, they are just the two things most likely to cause
+the *first* dropout. A plugin puts real work on the audio thread; a stream
+block spends its first fifteen seconds opening an HTTP connection and then
+decodes in bursts. After that the mechanism was the same whatever had started
+it.
+
+The cap is now a period and a half. It is more than a period, so the depth
+climbs back by half a period a time and a dropout costs a few milliseconds
+rather than the session; and it is only half a period more than the steady
+state, so catching up asks the capture rings for a little more than usual
+rather than swallowing one whole.
 
 ## Editing a running session
 

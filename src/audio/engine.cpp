@@ -708,10 +708,17 @@ void Engine::Render(float* out, size_t frames)
     const size_t samples = frames * kChannels;
     if (m_bus.size() < samples)
     {
-        m_bus.resize(samples);
-        m_tmp.resize(samples);
-        m_out.resize(samples);
-        m_trk.resize(samples);
+        // Grown to the largest block the graph is set up for rather than to
+        // whatever this call happens to need. Growing is a heap allocation on
+        // the audio thread, and the moment it is most likely to be wanted is a
+        // refill after a dropout, which is the worst moment to stop and
+        // allocate. This way it happens on the first call and then never.
+        const size_t room = (std::max)(samples,
+                                       (size_t)kMaxRenderBlock * kChannels);
+        m_bus.resize(room);
+        m_tmp.resize(room);
+        m_out.resize(room);
+        m_trk.resize(room);
     }
     std::fill(m_bus.begin(), m_bus.begin() + samples, 0.0f);
     std::fill(out, out + samples, 0.0f);
