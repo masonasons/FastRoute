@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <mutex>
+#include <vector>
 
 std::wstring FormatW(const wchar_t* fmt, ...)
 {
@@ -170,7 +171,33 @@ std::wstring ResolveRecordFolder(const std::wstring& folder)
         }
     }
     if (!dir.empty() && dir.back() == L'\\') dir.pop_back();
-    return dir;
+    if (dir.empty()) return dir;        // nowhere, rather than here
+
+    // Fully qualified, whatever was typed. A folder can be entered by hand as
+    // well as browsed for, and "Recordings" is a perfectly reasonable thing to
+    // type into a program that keeps everything beside its executable.
+    //
+    // It has to be made absolute here because SHCreateDirectoryExW - which is
+    // what actually creates the folder - refuses a relative path outright with
+    // ERROR_BAD_PATHNAME, including ".\\like\\this". Nothing noticed for a long
+    // time, because a relative folder that already existed worked fine and the
+    // one that was never created was the one nobody had asked for yet. A
+    // template that asks for a subfolder asks for a new folder every time, so
+    // it turned a silent no-op into a recording that would not start.
+    //
+    // Resolved against the working directory, which is what matters: that is
+    // where fopen will look for the same relative path, so the folder created
+    // and the folder written into are the same folder.
+    const DWORD need = GetFullPathNameW(dir.c_str(), 0, nullptr, nullptr);
+    if (need == 0) return dir;          // no better answer than what we have
+
+    std::vector<wchar_t> full(need + 1, 0);
+    const DWORD got = GetFullPathNameW(dir.c_str(), need + 1, full.data(), nullptr);
+    if (got == 0 || got > need) return dir;
+
+    std::wstring out(full.data(), got);
+    if (!out.empty() && out.back() == L'\\') out.pop_back();
+    return out;
 }
 
 bool DirectoryExists(const std::wstring& path)

@@ -44,6 +44,11 @@ bool DirectoryExists(const std::wstring& path);
 // Music\FastRoute, which is the fallback the recorder has always used. The
 // folder is only worked out here, never created: the recorder makes it when it
 // opens a file, and merely asking where it is should not leave one behind.
+//
+// Always fully qualified, since a folder can be typed by hand as well as
+// browsed for. SHCreateDirectoryExW refuses a relative path outright, so a
+// relative folder was never actually created - and an error message that names
+// the folder is a good deal more use when it says where the folder is.
 std::wstring ResolveRecordFolder(const std::wstring& folder);
 
 // "1:02:03", or "4:07" under an hour. Durations here are read out loud, and

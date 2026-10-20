@@ -1247,6 +1247,12 @@ cleaned signal from the same session.
   have given it - `Stream 2026-10-19 20-35-44` - which puts the mix *in* the
   session folder beside its tracks rather than next to the folder.
 * Leaving the folder blank records into `Music\FastRoute`.
+* **A relative folder works**, and is taken relative to the working directory
+  the same way any other relative path in the program is - so `Recordings` on
+  a portable copy records beside the executable. It is resolved to a full path
+  before anything is created, which it has to be: the Windows call that makes
+  a folder tree refuses a relative path outright. The folder *setting* stays
+  as you typed it, so a portable copy stays portable.
 * **Ctrl+Shift+O** opens the recording folder in Explorer, from either window.
   In the session window a selected Recorder block wins, so a session with more
   than one opens the one being looked at; otherwise it is the session's first.

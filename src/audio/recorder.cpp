@@ -217,7 +217,17 @@ std::wstring ResolveRecordingPath(const std::wstring& folder,
 
     // After the name has settled, so the folders made are the ones being
     // written into rather than a set from a candidate that collided.
-    SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+    const int made = SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+    if (made != ERROR_SUCCESS && made != ERROR_ALREADY_EXISTS &&
+        made != ERROR_FILE_EXISTS && !DirectoryExists(dir))
+    {
+        // Said here rather than left to the recorder, which can only report
+        // that it could not create a file - and a file it cannot create
+        // because the folder is not there reads as a fault in the file name
+        // rather than in the folder.
+        LogError(FormatW(L"%s could not be created (error %d), so there is "
+                         L"nowhere to record to.", dir.c_str(), made));
+    }
     return path;
 }
 
