@@ -771,6 +771,11 @@ bool RecFormatAvailable(RecFormat fmt);
 // nine blocks or fewer numbers them 1 to 9 and one of twelve numbers them 01
 // to 12, and either way the files sort into pipeline order. Zero leaves it
 // empty, like an absent {block}.
+//
+// A slash or a backslash in the template makes a folder: "{session}\\{block}"
+// writes a folder per session with a file per block inside it, and the folders
+// are created. A token's own value cannot do that - those are cleaned first -
+// and ".." is dropped, so nothing is written outside `folder`.
 std::wstring ResolveRecordingPath(const std::wstring& folder,
                                   const std::wstring& nameTemplate,
                                   const std::wstring& sessionName,

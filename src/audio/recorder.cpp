@@ -59,7 +59,11 @@ const wchar_t* RecFormatName(RecFormat fmt)
     }
 }
 
-static std::wstring SanitiseName(const std::wstring& in)
+// One piece of a path - a folder name or a file name, never both. Separators
+// are among the characters taken out, because a piece holding one would be two
+// pieces. Comes back empty when there was nothing usable in it, which is how a
+// caller tells.
+static std::wstring SanitisePiece(const std::wstring& in)
 {
     std::wstring out;
     for (wchar_t c : in)
@@ -69,7 +73,49 @@ static std::wstring SanitiseName(const std::wstring& in)
     }
     // Trailing dots and spaces are legal to type but not to create.
     while (!out.empty() && (out.back() == L'.' || out.back() == L' ')) out.pop_back();
+    return out;
+}
+
+static std::wstring SanitiseName(const std::wstring& in)
+{
+    std::wstring out = SanitisePiece(in);
     return out.empty() ? std::wstring(L"recording") : out;
+}
+
+// A resolved template, split on either slash into the pieces of a relative
+// path. Empty pieces are dropped, so a doubled separator or one on the end
+// does not ask for a folder with no name.
+//
+// Each piece is cleaned on its own, which is what makes this safe to build a
+// path out of: "." and ".." are thrown away rather than cleaned, the second
+// one being the one that would write outside the folder the recorder was
+// pointed at, and no colon survives to be read as a drive.
+static std::vector<std::wstring> SplitTemplatePath(const std::wstring& in)
+{
+    std::vector<std::wstring> out;
+    std::wstring piece;
+
+    for (size_t i = 0; i <= in.size(); ++i)
+    {
+        // One past the end counts as a separator, so the last piece is taken
+        // by the same code as the rest.
+        const wchar_t c = (i < in.size()) ? in[i] : L'/';
+        if (c != L'/' && c != L'\\')
+        {
+            piece += c;
+            continue;
+        }
+
+        std::wstring one = piece;
+        piece.clear();
+        while (!one.empty() && one.front() == L' ') one.erase(0, 1);
+        while (!one.empty() && one.back() == L' ') one.pop_back();
+        if (one == L"." || one == L"..") continue;
+
+        std::wstring clean = SanitisePiece(one);
+        if (!clean.empty()) out.push_back(clean);
+    }
+    return out;
 }
 
 static void ReplaceAll(std::wstring& s, const std::wstring& from, const std::wstring& to)
@@ -107,39 +153,71 @@ std::wstring ResolveRecordingPath(const std::wstring& folder,
         index = FormatW(L"%0*d", width, blockIndex);
     }
 
+    // Each token's value is cleaned before it goes in, so a session or a block
+    // whose name holds a slash cannot make a folder out of it. Only a
+    // separator the user typed in the template itself does that.
     std::wstring name = nameTemplate.empty() ? std::wstring(L"{session} {date} {time}")
                                              : nameTemplate;
-    ReplaceAll(name, L"{session}",  sessionName);
-    ReplaceAll(name, L"{block}",    blockName);
+    ReplaceAll(name, L"{session}",  SanitisePiece(sessionName));
+    ReplaceAll(name, L"{block}",    SanitisePiece(blockName));
     ReplaceAll(name, L"{index}",    index);
     // The name this was asked for by, kept working alongside the shorter one.
     ReplaceAll(name, L"{blocknumber}", index);
     ReplaceAll(name, L"{date}",     date);
     ReplaceAll(name, L"{time}",     time);
     ReplaceAll(name, L"{datetime}", date + L" " + time);
-    name = SanitiseName(name);
 
+    // The template is a relative path rather than only a name: a slash or a
+    // backslash in it makes a folder, so "{session}\\{block}" writes a folder
+    // per session with a file per block inside it.
+    //
     // Worked out in one place, because Ctrl+Shift+O has to open the same
     // folder this is about to write into.
-    std::wstring dir = ResolveRecordFolder(folder);
-    SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
-
+    const std::wstring base = ResolveRecordFolder(folder);
     const wchar_t* ext = RecFormatExt(fmt);
 
-    // {n} is the collision escape hatch. Whether or not the template uses it,
-    // never overwrite a file that is already there.
-    std::wstring path;
+    // A template that ends at a separator names folders and no file, which is
+    // what "{session}\\{block}" comes to for a recorder's own mixed file: that
+    // file is of no single block, so {block} is empty. It gets the name an
+    // empty template would have given it, which puts the mix in the same
+    // folder as the tracks rather than beside it.
+    std::wstring tail = name;
+    while (!tail.empty() && tail.back() == L' ') tail.pop_back();
+    const bool endsAtSeparator = !tail.empty() &&
+                                 (tail.back() == L'/' || tail.back() == L'\\');
+    const std::wstring fallback = SanitiseName(SanitisePiece(sessionName) +
+                                               L" " + date + L" " + time);
+
+    // {n} is the collision escape hatch, substituted across the whole path so
+    // that it works in a folder's name as well as a file's. Whether or not the
+    // template uses it, never overwrite a file that is already there.
+    std::wstring dir, path;
     for (int n = 1; n < 10000; ++n)
     {
         std::wstring candidate = name;
-        if (candidate.find(L"{n}") != std::wstring::npos)
-            ReplaceAll(candidate, L"{n}", FormatW(L"%03d", n));
-        else if (n > 1)
-            candidate += FormatW(L" (%d)", n);
+        const bool hasN = candidate.find(L"{n}") != std::wstring::npos;
+        if (hasN) ReplaceAll(candidate, L"{n}", FormatW(L"%03d", n));
 
-        path = dir + L"\\" + candidate + L"." + ext;
+        std::vector<std::wstring> parts = SplitTemplatePath(candidate);
+
+        std::wstring leaf;
+        if (!endsAtSeparator && !parts.empty())
+        {
+            leaf = parts.back();
+            parts.pop_back();
+        }
+        if (leaf.empty()) leaf = fallback;
+        if (!hasN && n > 1) leaf += FormatW(L" (%d)", n);
+
+        dir = base;
+        for (const std::wstring& p : parts) dir += L"\\" + p;
+        path = dir + L"\\" + leaf + L"." + ext;
         if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) break;
     }
+
+    // After the name has settled, so the folders made are the ones being
+    // written into rather than a set from a candidate that collided.
+    SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
     return path;
 }
 
