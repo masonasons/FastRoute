@@ -3841,6 +3841,10 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
             // Nothing to be quiet about when it is never going to look.
             EnableWindow(GetDlgItem(dlg, IDC_SET_UPDATE_SILENT), when != UC_NEVER);
         }
+        CheckDlgButton(dlg, IDC_SET_CONFIRM_EXIT,
+                       g_store.settings.confirmExit ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dlg, IDC_SET_START_HIDDEN,
+                       g_store.settings.startHidden ? BST_CHECKED : BST_UNCHECKED);
 
         // An empty list is not helpful when the answer is the same two folders
         // on almost every machine, so those are offered to begin with.
@@ -3989,6 +3993,10 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
                 g_store.settings.updateSilent =
                     IsDlgButtonChecked(dlg, IDC_SET_UPDATE_SILENT) == BST_CHECKED;
             }
+            g_store.settings.confirmExit =
+                IsDlgButtonChecked(dlg, IDC_SET_CONFIRM_EXIT) == BST_CHECKED;
+            g_store.settings.startHidden =
+                IsDlgButtonChecked(dlg, IDC_SET_START_HIDDEN) == BST_CHECKED;
             g_store.settings.showHide = want;
             g_store.settings.pluginPaths = ReadPluginPaths(dlg);
             g_store.settings.recFolder = rec;
@@ -4186,6 +4194,87 @@ static INT_PTR CALLBACK AboutDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 // recording is the files at the end of it. This opens the folder in Explorer
 // from either window, without going looking for the block first.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Exiting while sessions are running
+//
+// Exiting stops every session, and a running session is usually the whole
+// reason FastRoute is open - somebody recording an hour of a game does not
+// want to find that Alt+F4 in the wrong window ended it. So it asks, and names
+// what is running, because "sessions are running" is not enough to decide on
+// when the answer depends on which.
+//
+// The box to stop it asking is the point of asking at all: a confirmation
+// nobody can turn off becomes a key people learn to press without reading,
+// which is worse than not asking. It is in Settings too, so it can be turned
+// back on by somebody who regrets it.
+// ---------------------------------------------------------------------------
+
+static INT_PTR CALLBACK ConfirmExitDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_INITDIALOG:
+    {
+        const std::vector<std::wstring>* names =
+            reinterpret_cast<const std::vector<std::wstring>*>(lp);
+
+        std::wstring text;
+        if (names->size() == 1)
+            text = FormatW(L"\"%s\" is running.\r\n\r\n", names->front().c_str());
+        else
+        {
+            text = FormatW(L"%zu sessions are running:\r\n\r\n", names->size());
+            for (const std::wstring& n : *names) text += L"    " + n + L"\r\n";
+            text += L"\r\n";
+        }
+        text += L"Exiting FastRoute stops them. Any recording in progress is "
+                L"closed properly first, so no recording is lost.";
+
+        SetDlgItemTextW(dlg, IDC_EXIT_TEXT, text.c_str());
+        return TRUE;        // the dialog manager sets the focus
+    }
+
+    case WM_COMMAND:
+        switch (LOWORD(wp))
+        {
+        case IDOK:
+            // Only on the way out, and deliberately not when the answer was
+            // Cancel: ticking the box and then changing your mind about
+            // exiting should not quietly change a setting as well.
+            if (IsDlgButtonChecked(dlg, IDC_EXIT_DONTASK) == BST_CHECKED)
+            {
+                g_store.settings.confirmExit = false;
+                std::wstring err;
+                g_store.Save(&err);    // the exit path has its own reasons to fail
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+
+        case IDCANCEL:
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+bool ConfirmExitWhileRunning(HWND owner)
+{
+    if (!g_store.settings.confirmExit) return true;
+
+    std::vector<std::wstring> running;
+    for (const Session& s : g_store.sessions)
+        if (SessionRunning(s.id))
+            running.push_back(s.name.empty() ? std::wstring(L"An unnamed session")
+                                             : s.name);
+    if (running.empty()) return true;
+
+    return DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_CONFIRM_EXIT), owner,
+                           ConfirmExitDlgProc,
+                           reinterpret_cast<LPARAM>(&running)) == IDOK;
+}
 
 void OpenRecordFolder(HWND owner, int sessionId, int preferBlock)
 {

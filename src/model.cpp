@@ -1601,6 +1601,8 @@ void SessionStore::Load()
             }
         settings.updateCheck = set->AsInt(L"updateCheck", UC_NEVER);
         settings.updateSilent = set->AsBool(L"updateSilent", false);
+        settings.confirmExit = set->AsBool(L"confirmExit", true);
+        settings.startHidden = set->AsBool(L"startHidden", false);
 
         const Json* paths = set->Find(L"pluginPaths");
         if (paths && paths->IsArray())
@@ -1706,6 +1708,8 @@ bool SessionStore::Save(std::wstring* err) const
     set.Set(L"recFolder", Json::Str(settings.recFolder));
     set.Set(L"updateCheck", Json::Num(settings.updateCheck));
     set.Set(L"updateSilent", Json::Bool(settings.updateSilent));
+    set.Set(L"confirmExit", Json::Bool(settings.confirmExit));
+    set.Set(L"startHidden", Json::Bool(settings.startHidden));
 
     Json paths = Json::Arr();
     for (const std::wstring& p : settings.pluginPaths) paths.Push(Json::Str(p));

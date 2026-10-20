@@ -51,6 +51,11 @@ long long ScheduleDueAt(const ScheduleEvent& e, const SYSTEMTIME& now);
 std::wstring ScheduleNextText(const ScheduleEvent& e);
 
 // ---- notification area and the global hotkey ------------------------------
+// The message a second FastRoute broadcasts to ask the one already running to
+// show itself. Registered rather than a WM_APP number so that it cannot mean
+// something else in another program's window.
+UINT ShowRequestMessage();
+
 bool IsHiddenToTray();
 void HideToTray(HWND owner);
 void ShowFromTray(HWND owner);
@@ -135,6 +140,11 @@ int  ImportSession(HWND owner);
 void ShowAboutDialog(HWND parent);
 void ShowErrorLogDialog(HWND parent);
 void ShowSettingsDialog(HWND parent);
+
+// Asks before exiting while sessions are running, since exiting stops them.
+// True to go ahead. Answers true without asking when nothing is running, or
+// when the settings say not to.
+bool ConfirmExitWhileRunning(HWND owner);
 
 // ---- small helpers --------------------------------------------------------
 struct ListKeys

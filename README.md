@@ -1230,6 +1230,22 @@ cleaned signal from the same session.
   existing file is never overwritten: `{n}` becomes the next free number, and
   without it a ` (2)` suffix is appended. The extension is added
   automatically.
+* **A slash or a backslash in the template makes a folder.** `{session}\\{block}`
+  or `{session}/{block}` writes a folder named after the session with a file
+  per block inside it, and the folders are created. Either separator works, as
+  many levels deep as you like - `{session}\\{date}\\{block}` gives a folder per
+  session, a folder per day inside it, and the blocks inside that.
+
+  Only a separator you typed in the template counts. A session or block whose
+  *name* contains a slash still writes one file with a dash in its name, as it
+  always did: a name is somebody's text, not a path. `..` is dropped rather
+  than followed, so nothing is written outside the recorder's folder whatever
+  the template says.
+
+  A recorder's own mixed file is of no one block, so `{session}\\{block}` leaves
+  it with a folder and no file name. It gets the name an empty template would
+  have given it - `Stream 2026-10-19 20-35-44` - which puts the mix *in* the
+  session folder beside its tracks rather than next to the folder.
 * Leaving the folder blank records into `Music\FastRoute`.
 * **Ctrl+Shift+O** opens the recording folder in Explorer, from either window.
   In the session window a selected Recorder block wins, so a session with more
@@ -1515,6 +1531,7 @@ it, so one session can feed two destinations with different content:
 | F2             | Rename                                    |
 | Delete         | Delete                                    |
 | Shift+F10      | Context menu, including Hotkey            |
+| Esc            | Nothing - see **Exiting**                 |
 
 ### Session window
 
@@ -1911,6 +1928,60 @@ window people could not get rid of. The tray icon exists only while hidden, so
 the notification area is not carrying an icon for a window that is on screen
 anyway. Its menu offers Show, Settings and Exit; Enter or a click on the icon
 shows the window.
+
+### Starting hidden
+
+**Settings** has **start with the main window hidden in the notification
+area**, off by default. For a machine where FastRoute runs all the time and the
+sessions start themselves, the window is not what you wanted to see at login.
+
+The window is never shown at all rather than shown and then taken away, which
+would flash on screen and - worse - take the focus from whatever you were
+doing.
+
+There is always a way back, even with the global hotkey switched off and the
+notification area refusing the icon: **launching FastRoute again shows the copy
+already running** rather than starting a second one.
+
+## One instance at a time
+
+Starting FastRoute while it is already running does not start a second copy. It
+asks the one already running to show itself and exits without a word, which is
+what you wanted anyway - the usual reason for launching it twice is that the
+window was hidden.
+
+Two copies would fight over everything that matters. Both read `sessions.json`
+when they start and both write it when they exit, so whichever exits last wins
+and the other's edits are gone. A global hotkey can only be registered once, so
+the second copy's silently do nothing. And two copies of one session open the
+same endpoints twice, which for an application block means capturing the same
+audio twice into two different places.
+
+The scope is one logged-in user, not the whole machine: two people signed into
+the same computer have their own settings and their own devices, and neither is
+the other's second instance.
+
+## Exiting
+
+**Escape does not close the main window.** It is the main window rather than a
+dialog with something to cancel, and Escape is the key people press to back out
+of whatever they are in the middle of - pressed one window too many it was
+shutting FastRoute down and stopping every session with it. Exiting is **File >
+Exit**, **Alt+F4**, or Exit on the notification area icon. Escape still closes
+every dialog, and still closes a session window.
+
+**Exiting while sessions are running asks first**, and names which sessions
+they are - "sessions are running" is not enough to decide on when the answer
+depends on which. Anything being recorded is closed properly before FastRoute
+goes, so no recording is lost either way; the question is about the audio
+stopping, not about the files.
+
+The dialog has a **Don't ask this again** box, which is the point of asking at
+all: a confirmation nobody can turn off becomes a key people learn to press
+without reading, which is worse than not asking. Ticking it and then pressing
+Cancel does *not* change the setting - changing your mind about exiting should
+not quietly change a preference as well. It is in Settings too, as **ask before
+exiting while sessions are running**, so it can be turned back on.
 
 ## Hotkeys for one session or one block
 

@@ -605,6 +605,15 @@ static void CmdToggle(HWND dlg)
 
 INT_PTR CALLBACK MainDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
+    // A second FastRoute was launched and handed over to this one rather than
+    // starting beside it. Not in the switch below because a registered message
+    // has no number until it is asked for at run time.
+    if (msg == ShowRequestMessage())
+    {
+        ShowFromTray(dlg);
+        return TRUE;
+    }
+
     switch (msg)
     {
     case WM_INITDIALOG:
@@ -715,8 +724,16 @@ INT_PTR CALLBACK MainDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_SCHED_TOGGLE:    CmdSchedToggle(dlg); return TRUE;
         case IDM_HELP_ABOUT:      ShowAboutDialog(dlg); return TRUE;
         case IDM_APP_EXIT:
-        case IDCANCEL:
             SendMessageW(dlg, WM_CLOSE, 0, 0);
+            return TRUE;
+
+        // Escape, which a dialog sends here as IDCANCEL, deliberately does
+        // nothing. This is the main window rather than a dialog with
+        // something to cancel, and Escape is a key people press to back out
+        // of whatever they are in the middle of - pressed one window too
+        // many, it was shutting FastRoute down and stopping every session with
+        // it. Exiting is the File menu, Alt+F4, or the notification area.
+        case IDCANCEL:
             return TRUE;
         }
         break;
@@ -811,6 +828,11 @@ INT_PTR CALLBACK MainDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_CLOSE:
+        // Before anything is taken apart, since the answer may be no. Alt+F4
+        // and the notification area's Exit both arrive here too, which is the
+        // point: they are the two ways to exit by accident.
+        if (!ConfirmExitWhileRunning(dlg)) return TRUE;
+
         KillTimer(dlg, kSchedulerTimer);
         KillTimer(dlg, kRunningTimer);
         // Closing exits. Hiding is Ctrl+H, the menu item, or the hotkey, and

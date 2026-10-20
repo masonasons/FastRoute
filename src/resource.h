@@ -35,6 +35,7 @@
 #define IDD_BLOCK_NETRECV        128
 #define IDD_BLOCK_NETSEND        129
 #define IDD_BLOCK_ASIO           131
+#define IDD_CONFIRM_EXIT         132
 #define IDD_NET_OPUS             130
 
 // Menus
@@ -354,6 +355,12 @@
 #define IDC_REC_RATE_LABEL      1337
 #define IDC_REC_BITS            1338
 #define IDC_REC_BITS_LABEL      1339
+
+// Exiting while sessions are running
+#define IDC_EXIT_TEXT           1340
+#define IDC_EXIT_DONTASK        1341
+#define IDC_SET_CONFIRM_EXIT    1342
+#define IDC_SET_START_HIDDEN    1343
 
 // Ten band EQ: one slider and one readout per band, contiguous so the band
 // index is just the control id minus the base.

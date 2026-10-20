@@ -146,10 +146,63 @@ void RunStartupSessions()
 }
 
 // ---------------------------------------------------------------------------
+// One instance at a time
+//
+// Two FastRoutes on one machine fight over everything that matters. Both read
+// sessions.json when they start and both write it when they exit, so whichever
+// exits last wins and the other's edits are gone. A global hotkey can only be
+// registered once, so the second copy's silently do nothing. And two copies of
+// one session open the same endpoints twice, which for an application block
+// means capturing the same audio twice into two different places.
+//
+// So the second one hands over rather than refusing: it asks the copy already
+// running to show itself and exits without a word. That is what somebody who
+// has just launched FastRoute again wanted anyway - the usual reason for doing
+// it is that the window was hidden to the notification area.
+// ---------------------------------------------------------------------------
+
+UINT ShowRequestMessage()
+{
+    // Registered once per process and the same number in every process that
+    // asks for this string, which is what makes it safe to broadcast.
+    static const UINT m = RegisterWindowMessageW(L"FastRoute.ShowWindow");
+    return m;
+}
+
+static HANDLE g_soleInstance = nullptr;
+
+// True when this process is the one that should carry on.
+static bool ClaimSoleInstance()
+{
+    // Local rather than Global, so the scope is one logged-in user. Two people
+    // signed into the same machine have their own settings and their own audio
+    // devices, and neither is the other's second instance.
+    g_soleInstance = CreateMutexW(nullptr, TRUE, L"Local\\FastRoute.SingleInstance");
+    if (g_soleInstance && GetLastError() != ERROR_ALREADY_EXISTS) return true;
+
+    if (g_soleInstance) { CloseHandle(g_soleInstance); g_soleInstance = nullptr; }
+
+    // The running copy is about to call SetForegroundWindow, which Windows
+    // only grants to the process already in front - which, for this moment, is
+    // this one. Handing that right over is what this call is for.
+    AllowSetForegroundWindow(ASFW_ANY);
+
+    // Broadcast rather than sent to a window looked up by name: the main
+    // window is a dialog and has no class of its own to find it by, and a
+    // broadcast reaches it whether it is hidden or not.
+    PostMessageW(HWND_BROADCAST, ShowRequestMessage(), 0, 0);
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int)
 {
     g_inst = inst;
+
+    // Before anything is loaded or opened, and before COM: there is nothing to
+    // undo if this copy is not the one that carries on.
+    if (!ClaimSoleInstance()) return 0;
 
     HRESULT hrCom = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(hrCom))
@@ -174,7 +227,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int)
         CoUninitialize();
         return 1;
     }
-    ShowWindow(g_mainDlg, SW_SHOW);
+    // Hidden from the start, when the settings ask for it: the window is never
+    // shown at all rather than shown and then taken away, which would flash on
+    // screen and, worse, take the focus from whatever the user was doing.
+    //
+    // There is a way back even if the hotkey is off and the notification area
+    // icon will not go in: launching FastRoute again asks the copy already
+    // running to show itself rather than starting beside it.
+    if (g_store.settings.startHidden) HideToTray(g_mainDlg);
+    else                              ShowWindow(g_mainDlg, SW_SHOW);
 
     // An ASIO driver is handed a window when it starts, and some of them use
     // it. Set before any session can open one.
@@ -210,6 +271,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int)
     StopUpdateChecks();
     StopAllSessions();
     CoUninitialize();
+    // Last, so that a FastRoute started while this one is shutting down cannot
+    // come up and read sessions.json while WM_CLOSE is still writing it.
+    if (g_soleInstance) { CloseHandle(g_soleInstance); g_soleInstance = nullptr; }
     return (int)msg.wParam;
 }
 

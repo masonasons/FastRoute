@@ -1091,7 +1091,7 @@ END
 /////////////////////////////////////////////////////////////////////////////
 // Settings
 
-IDD_SETTINGS DIALOGEX 0, 0, 280, 356
+IDD_SETTINGS DIALOGEX 0, 0, 280, 392
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "FastRoute Settings"
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -1131,8 +1131,29 @@ BEGIN
     CONTROL         "Install it &quietly, without asking first",
                     IDC_SET_UPDATE_SILENT, "Button",
                     BS_AUTOCHECKBOX | WS_TABSTOP, 7, 314, 266, 12
-    DEFPUSHBUTTON   "OK",     IDOK,     166, 334, 50, 16
-    PUSHBUTTON      "Cancel", IDCANCEL, 223, 334, 50, 16
+    CONTROL         "Ask &before exiting while sessions are running",
+                    IDC_SET_CONFIRM_EXIT, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 7, 332, 266, 12
+    CONTROL         "Start with the main window &hidden in the notification area",
+                    IDC_SET_START_HIDDEN, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 7, 348, 266, 12
+    DEFPUSHBUTTON   "OK",     IDOK,     166, 370, 50, 16
+    PUSHBUTTON      "Cancel", IDCANCEL, 223, 370, 50, 16
+END
+
+/////////////////////////////////////////////////////////////////////////////
+// Exiting while sessions are running
+
+IDD_CONFIRM_EXIT DIALOGEX 0, 0, 280, 132
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Exit FastRoute"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "", IDC_EXIT_TEXT, 7, 7, 266, 72
+    CONTROL         "&Don't ask this again", IDC_EXIT_DONTASK, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 7, 86, 266, 12
+    DEFPUSHBUTTON   "E&xit",   IDOK,     166, 108, 50, 16
+    PUSHBUTTON      "&Cancel", IDCANCEL, 223, 108, 50, 16
 END
 
 /////////////////////////////////////////////////////////////////////////////

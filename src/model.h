@@ -755,6 +755,20 @@ struct AppSettings
     // be a poor surprise.
     bool updateSilent = false;
 
+    // Whether FastRoute comes up hidden in the notification area. For a
+    // machine where it runs all the time and the sessions start themselves,
+    // the window is not what you wanted to see at login. Off by default,
+    // because a program that starts invisible is a program somebody has to be
+    // told about first - and they have, by ticking this.
+    bool startHidden = false;
+
+    // Whether exiting while sessions are running asks first. Exiting stops
+    // them, and a session is often the whole reason FastRoute is open - so it
+    // asks, with a box to say not to bother next time. Kept as "ask" rather
+    // than "do not ask" so that the default is the careful one and a settings
+    // file from an older version arrives with it on.
+    bool confirmExit = true;
+
     // Which groups in the blocks library are shut. The collapsed ones rather
     // than the expanded ones, so that an empty list means everything open,
     // which is how it behaved before this was remembered at all - and so that
