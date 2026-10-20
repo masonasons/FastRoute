@@ -1511,6 +1511,62 @@ bool SessionFromText(const std::wstring& text, Session& out, std::wstring* err)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Undoing a removal
+// ---------------------------------------------------------------------------
+
+void UndoStack::Cap(std::vector<Removal>& v)
+{
+    // The oldest goes, not the newest: the thing most likely to be wanted back
+    // is the thing removed most recently.
+    while (v.size() > kMaxDepth) v.erase(v.begin());
+}
+
+void UndoStack::Record(Removal r)
+{
+    m_undo.push_back(std::move(r));
+    Cap(m_undo);
+    m_redo.clear();
+}
+
+void UndoStack::PushUndo(Removal r)
+{
+    m_undo.push_back(std::move(r));
+    Cap(m_undo);
+}
+
+void UndoStack::PushRedo(Removal r)
+{
+    m_redo.push_back(std::move(r));
+    Cap(m_redo);
+}
+
+std::wstring UndoStack::UndoWhat() const
+{
+    return m_undo.empty() ? std::wstring() : m_undo.back().What();
+}
+
+std::wstring UndoStack::RedoWhat() const
+{
+    return m_redo.empty() ? std::wstring() : m_redo.back().What();
+}
+
+bool UndoStack::PopUndo(Removal& out)
+{
+    if (m_undo.empty()) return false;
+    out = std::move(m_undo.back());
+    m_undo.pop_back();
+    return true;
+}
+
+bool UndoStack::PopRedo(Removal& out)
+{
+    if (m_redo.empty()) return false;
+    out = std::move(m_redo.back());
+    m_redo.pop_back();
+    return true;
+}
+
 ImportReport RepointDevices(Session& s,
                             const std::vector<std::pair<std::wstring,
                                                         std::wstring>>& present)

@@ -697,6 +697,83 @@ ImportReport RepointDevices(Session& s,
                                                         std::wstring>>& present);
 
 // ---------------------------------------------------------------------------
+// Undoing a removal
+//
+// Scoped deliberately to removals, which is what was asked for: somewhere to
+// get a session or a block back from after deleting the wrong one, rather than
+// an undo of every edit there is. A block's parameters already have a Cancel
+// button, and a document-wide undo would be a much larger promise than "I did
+// not mean to press Delete".
+//
+// Because of that scope Ctrl+Z is not the inverse of the last thing you did,
+// it is the inverse of the last thing you *removed*. Two things keep that from
+// being a surprise: the menu item says which removal it will undo, every time,
+// and the status line says what came back and where it went. And an undo here
+// only ever puts something in - it never takes anything away - so it cannot
+// lose work done since.
+//
+// The stacks are strictly last-in-first-out, which is what keeps the recorded
+// positions meaning anything: undoing removals in the reverse of the order
+// they happened puts the list back through the states it was actually in. An
+// edit of another kind in between can leave a deeper position stale, so a
+// position is clamped to the list rather than trusted, and the status line
+// says where the block actually went.
+// ---------------------------------------------------------------------------
+
+// One thing that was removed and could be put back: either a whole session, or
+// one block out of the session named by `sessionId`.
+struct Removal
+{
+    int sessionId = 0;          // 0 when it is the session itself that went
+    size_t at = 0;              // where in the block list it was
+    Block block;                // when sessionId is not 0
+    Session session;            // when sessionId is 0
+    std::wstring name;          // what it was called, for the menu and the status line
+    std::wstring verb;          // "removing", "cutting", "deleting"
+
+    // "removing Microphone", which is what the menu item is made of.
+    std::wstring What() const { return verb + L" " + name; }
+};
+
+class UndoStack
+{
+public:
+    // A removal as it happens. This clears the redo side: whatever was there
+    // was the inverse of a list that no longer exists.
+    void Record(Removal r);
+
+    bool CanUndo() const { return !m_undo.empty(); }
+    bool CanRedo() const { return !m_redo.empty(); }
+
+    // What the menu item should say it will do, or empty for nothing to do.
+    std::wstring UndoWhat() const;
+    std::wstring RedoWhat() const;
+
+    // Taking one off a side and putting one back on. Two steps rather than one
+    // so that the caller can amend what it took - a restored session may need
+    // a new id - before it goes on the other side.
+    bool PopUndo(Removal& out);
+    bool PopRedo(Removal& out);
+    void PushUndo(Removal r);   // after a redo; does not clear anything
+    void PushRedo(Removal r);   // after an undo
+
+    // Any edit that is not one of ours makes a redo meaningless.
+    void ClearRedo() { m_redo.clear(); }
+
+    // The session has gone, so putting a block back into it is not something
+    // that can be done.
+    void Forget() { m_undo.clear(); m_redo.clear(); }
+
+private:
+    // Deep enough to cover a run of mistakes, shallow enough that it is not
+    // quietly holding twenty sessions' worth of plugin state all afternoon.
+    static const size_t kMaxDepth = 20;
+    static void Cap(std::vector<Removal>& v);
+
+    std::vector<Removal> m_undo, m_redo;
+};
+
+// ---------------------------------------------------------------------------
 // Application settings
 // ---------------------------------------------------------------------------
 

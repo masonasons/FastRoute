@@ -146,6 +146,26 @@ void ShowSettingsDialog(HWND parent);
 // when the settings say not to.
 bool ConfirmExitWhileRunning(HWND owner);
 
+// ---------------------------------------------------------------------------
+// Undo, shared by the two windows that have an Edit menu
+// ---------------------------------------------------------------------------
+
+// Sets the Undo and Redo items to say what they will actually do - "Undo
+// removing Microphone" - and greys them when there is nothing to do. The menu
+// saying so before the key is pressed is what keeps a stack of removals from
+// being a surprise, since the last removal is not always the last edit.
+void NameUndoItems(HMENU menu, const UndoStack& stack, int undoId, int redoId);
+
+// Ctrl+Z belongs to a focused edit control when the focus is not on the list,
+// the same way Ctrl+C does. True when it has been dealt with there and there
+// is nothing for the undo command to do.
+bool PassUndoKeyOn(HWND dlg, WPARAM wp, int listId);
+
+// Everything remembered about removals from one session's block list, dropped.
+// The session has gone, so putting a block back into it is not something that
+// can be done.
+void ForgetBlockUndo(int sessionId);
+
 // ---- small helpers --------------------------------------------------------
 struct ListKeys
 {

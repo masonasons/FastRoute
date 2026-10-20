@@ -4196,6 +4196,47 @@ static INT_PTR CALLBACK AboutDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// Undo, the parts both windows need
+// ---------------------------------------------------------------------------
+
+void NameUndoItems(HMENU menu, const UndoStack& stack, int undoId, int redoId)
+{
+    // Only the popup that actually holds them; WM_INITMENUPOPUP arrives for
+    // every popup on the bar and ModifyMenu on a menu without the item would
+    // add one.
+    if (GetMenuState(menu, (UINT)undoId, MF_BYCOMMAND) == (UINT)-1) return;
+
+    struct { int id; std::wstring what; const wchar_t* label; const wchar_t* key; }
+    both[2] = {
+        { undoId, stack.UndoWhat(), L"&Undo", L"Ctrl+Z" },
+        { redoId, stack.RedoWhat(), L"&Redo", L"Ctrl+Y" },
+    };
+
+    for (const auto& one : both)
+    {
+        std::wstring text = one.label;
+        if (!one.what.empty()) text += L" " + one.what;
+        text += L"\t";
+        text += one.key;
+
+        ModifyMenuW(menu, (UINT)one.id, MF_BYCOMMAND | MF_STRING,
+                    (UINT_PTR)one.id, text.c_str());
+        EnableMenuItem(menu, (UINT)one.id,
+                       MF_BYCOMMAND | (one.what.empty() ? (MF_GRAYED | MF_DISABLED)
+                                                        : MF_ENABLED));
+    }
+}
+
+bool PassUndoKeyOn(HWND dlg, WPARAM wp, int listId)
+{
+    if (HIWORD(wp) != 1) return false;              // the menu item
+    HWND focus = GetFocus();
+    if (focus == GetDlgItem(dlg, listId)) return false;
+    if (focus && IsChild(dlg, focus)) SendMessageW(focus, WM_UNDO, 0, 0);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Exiting while sessions are running
 //
 // Exiting stops every session, and a running session is usually the whole

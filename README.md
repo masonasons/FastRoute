@@ -1456,6 +1456,70 @@ session whose blocks are all of types this build has never heard of is
 refused too, rather than imported as an empty session: it was probably
 exported by a newer FastRoute.
 
+## Undoing a removal
+
+**Ctrl+Z** puts back the last thing you removed, and **Ctrl+Y** (or
+**Ctrl+Shift+Z**) takes it away again. Both are on an **Edit** menu, in the
+main window for sessions and in the session window for blocks.
+
+A session comes back whole - its blocks, their parameters, its hotkeys - and a
+block comes back at the place it was taken from. That is the point of it:
+setting a session or a plugin block up again from scratch is the thing nobody
+wants to do twice.
+
+Twenty removals are kept, per session for blocks and once over for sessions.
+The two are separate on purpose: Ctrl+Z in one session window must never reach
+into another, and Ctrl+Z in the main window is about sessions whatever is open.
+
+### What it does not cover, and why the menu says so
+
+This undoes **removals**, not every edit. A block's parameters already have a
+Cancel button, and an undo of everything there is would be a much larger
+promise than "I did not mean to press Delete".
+
+So Ctrl+Z is not the inverse of the last thing you did - it is the inverse of
+the last thing you *removed*. Two things keep that from being a surprise. The
+menu item says which removal it will undo, every time: **Undo removing
+Microphone**, greyed out when there is nothing. And the status line says what
+came back and where it went. An undo here only ever puts something in, never
+takes anything away, so it cannot lose work you did in between.
+
+A **cut** counts as a removal, so Ctrl+Z after Ctrl+X puts the block back. The
+clipboard is not the same promise - one more cut and what was there is gone -
+which is why the undo stack keeps twenty of them.
+
+### The details worth knowing
+
+**Whether a session was running does not come back.** Restoring a document is
+one thing; starting audio without being asked is another.
+
+**A restored session may get a new id.** An id belongs to the document rather
+than to the session, so if one made since the deletion has taken that number,
+the restored session takes the next free one instead. Nothing on screen changes.
+
+**A hotkey another block has claimed since is cleared**, by the same rule a
+paste follows, and the status line says how many. Two blocks answering to one
+key is not a state worth restoring into.
+
+**A position is clamped rather than trusted.** Undoing removals in the reverse
+of the order they happened walks the block list back through the states it was
+actually in, so positions come out exactly right. An edit of another kind in
+between can leave a deeper position stale, and then the block lands as close as
+it can and the status line tells you where - one row out that you were told
+about beats refusing to give the block back.
+
+**A redo only survives until the next edit.** Anything else you do to the list
+makes a redo meaningless, because what it held were positions in a list that no
+longer exists, so it is thrown away. The undo side is kept: deleting a block,
+doing some other work and then wanting it back is the whole reason for this.
+
+**Deleting a session forgets its blocks' removals**, there being no list left
+to put them back into.
+
+The main window has no status line, so an undo there says what it did by
+landing the selection on the session it restored, which a screen reader reads
+out.
+
 ## Cut, copy and paste blocks
 
 In the block list: **Ctrl+X** cuts, **Ctrl+C** copies, **Ctrl+V** pastes below
@@ -1530,6 +1594,8 @@ it, so one session can feed two destinations with different content:
 | Menu           | Run at Startup, on the Session and context menus |
 | F2             | Rename                                    |
 | Delete         | Delete                                    |
+| Ctrl+Z         | Undo deleting a session                   |
+| Ctrl+Y         | Redo it, as does Ctrl+Shift+Z             |
 | Shift+F10      | Context menu, including Hotkey            |
 | Esc            | Nothing - see **Exiting**                 |
 
@@ -1547,6 +1613,8 @@ it, so one session can feed two destinations with different content:
 | Ctrl+C         | Copy the focused block                              |
 | Ctrl+V         | Paste below the focused block                       |
 | Ctrl+Shift+V   | Paste above the focused block                       |
+| Ctrl+Z         | Undo removing a block                               |
+| Ctrl+Y         | Redo it, as does Ctrl+Shift+Z                       |
 | Ctrl+R         | Run this session, or stop it                        |
 | Ctrl+H         | Hide to the notification area                       |
 | Ctrl+,         | Settings                                            |

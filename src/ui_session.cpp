@@ -6,6 +6,13 @@ static std::map<int, HWND> g_windows;
 static HACCEL g_sessionAccel = nullptr;
 static bool g_syncingChecks = false;   // ignore our own check-state updates
 
+// What one block is called, for anything said about it: its own name when it
+// has been given one, and its type when it has not.
+static std::wstring NameOf(const Block& b)
+{
+    return b.label.empty() ? b.TypeName() : b.label;
+}
+
 // ---------------------------------------------------------------------------
 // The block clipboard
 //
@@ -24,8 +31,41 @@ static bool  g_clipHas = false;
 // feedback a screen reader user gets.
 static std::wstring ClipName()
 {
-    if (!g_clipHas) return std::wstring();
-    return g_clip.label.empty() ? g_clip.TypeName() : g_clip.label;
+    return g_clipHas ? NameOf(g_clip) : std::wstring();
+}
+
+// ---------------------------------------------------------------------------
+// Blocks that have been removed and could be put back
+//
+// Per session rather than per window: Ctrl+Z in one session must never reach
+// into another, and closing a session window and opening it again should not
+// lose what it remembered.
+// ---------------------------------------------------------------------------
+static std::map<int, UndoStack> g_blockUndo;
+
+// Set while an undo or a redo is the edit being made. CommitEdit throws the
+// redo side away for every other edit - a redo holds positions in a list that
+// no longer exists - and this is how it tells its own work apart.
+static bool g_undoing = false;
+
+void ForgetBlockUndo(int sessionId)
+{
+    g_blockUndo.erase(sessionId);
+}
+
+// Taken before the erase, and with the whole block: its parameters are what
+// nobody wants to set up twice, which is the reason any of this exists.
+static void RecordRemoval(const Session& s, size_t at, const wchar_t* verb)
+{
+    if (at >= s.blocks.size()) return;
+
+    Removal r;
+    r.sessionId = s.id;
+    r.at = at;
+    r.block = s.blocks[at];
+    r.name = NameOf(r.block);
+    r.verb = verb;
+    g_blockUndo[s.id].Record(std::move(r));
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +398,12 @@ void RefreshSessionWindow(int sessionId)
 // if there is one, then redraw. Nothing here needs the session to be stopped.
 static void CommitEdit(HWND dlg, int id)
 {
+    // Any edit other than an undo or a redo makes a redo meaningless, the
+    // positions it holds being positions in the list as it was. The undo side
+    // is deliberately kept: "I deleted a block, did some other work, and now I
+    // want it back" is the whole reason for having this.
+    if (!g_undoing) g_blockUndo[id].ClearRedo();
+
     std::wstring err;
     if (!g_store.Save(&err)) ErrorBox(dlg, err);
     RefreshItemHotkeys(g_mainDlg);
@@ -547,6 +593,7 @@ static void CmdRemoveBlock(HWND dlg)
     int i = SelectedBlock(dlg);
     if (i < 0 || (size_t)i >= s->blocks.size()) return;
 
+    RecordRemoval(*s, (size_t)i, L"removing");
     s->blocks.erase(s->blocks.begin() + i);
     CommitEdit(dlg, id);
     SelectBlock(dlg, i);
@@ -620,11 +667,6 @@ static void SayInStatus(HWND dlg, const std::wstring& text)
     SetDlgItemTextW(dlg, IDC_SESSION_STATE, text.c_str());
 }
 
-static std::wstring NameOf(const Block& b)
-{
-    return b.label.empty() ? b.TypeName() : b.label;
-}
-
 // Ctrl+C, Ctrl+X and Ctrl+V are accelerators, so they are taken before any
 // control in the window sees them - including the times field, which is a
 // read-only edit precisely so that it can be read and copied from. So a
@@ -672,11 +714,97 @@ static void CmdCopyBlock(HWND dlg, bool cut)
         return;
     }
 
+    // A cut takes a block out of the list, so it is a removal like any other.
+    // The clipboard is not the same promise: one more cut and what was there
+    // is gone, while the undo stack keeps twenty.
+    RecordRemoval(*s, (size_t)i, L"cutting");
     s->blocks.erase(s->blocks.begin() + i);
     CommitEdit(dlg, id);
     SelectBlock(dlg, i);
     SayInStatus(dlg, FormatW(L"%s cut. Ctrl+V pastes it below the selected "
                              L"block, Ctrl+Shift+V above it.", name.c_str()));
+}
+
+// ---------------------------------------------------------------------------
+// Undoing a removed block
+//
+// It comes back whole - its parameters, its plugin's values, its hotkeys - at
+// the place it was taken from. The position is clamped rather than trusted:
+// undoing removals in the reverse of the order they happened walks the list
+// back through the states it was actually in, but an edit of another kind in
+// between can leave a deeper position stale, and landing a block one row out
+// is far better than refusing to give it back. The status line says where it
+// actually went, so one row out is one row you were told about.
+//
+// A hotkey the session has given to another block since is cleared, by the
+// same rule a paste follows: two blocks answering to one key is not a state
+// worth restoring into.
+// ---------------------------------------------------------------------------
+
+static void CmdUndoBlock(HWND dlg)
+{
+    int id = SessionIdOf(dlg);
+    Session* s = g_store.ById(id);
+    if (!s) return;
+
+    Removal r;
+    if (!g_blockUndo[id].PopUndo(r))
+    {
+        SayInStatus(dlg, L"There is nothing to undo in this session.");
+        return;
+    }
+
+    const int cleared = ClearClashingHotkeys(*s, r.block);
+
+    size_t at = r.at <= s->blocks.size() ? r.at : s->blocks.size();
+    r.at = at;              // what a redo will take away again
+    s->blocks.insert(s->blocks.begin() + at, r.block);
+
+    g_undoing = true;
+    CommitEdit(dlg, id);
+    g_undoing = false;
+    SetFocus(GetDlgItem(dlg, IDC_BLOCK_LIST));
+    SelectBlock(dlg, (int)at);
+
+    // CommitEdit has just redrawn the status line with the session state, so
+    // the reading goes on last. This is the line a screen reader announces.
+    std::wstring said = FormatW(L"%s restored at position %zu of %zu.",
+                                r.name.c_str(), at + 1, s->blocks.size());
+    if (cleared == 1)
+        said += L"  Its hotkey was cleared, because this session already uses it.";
+    else if (cleared > 1)
+        said += FormatW(L"  %d of its hotkeys were cleared, because this "
+                        L"session already uses them.", cleared);
+    SayInStatus(dlg, said);
+
+    g_blockUndo[id].PushRedo(std::move(r));
+}
+
+static void CmdRedoBlock(HWND dlg)
+{
+    int id = SessionIdOf(dlg);
+    Session* s = g_store.ById(id);
+    if (!s) return;
+
+    Removal r;
+    if (!g_blockUndo[id].PopRedo(r))
+    {
+        SayInStatus(dlg, L"There is nothing to redo in this session.");
+        return;
+    }
+
+    if (r.at < s->blocks.size())
+    {
+        s->blocks.erase(s->blocks.begin() + r.at);
+        g_undoing = true;
+        CommitEdit(dlg, id);
+        g_undoing = false;
+        SetFocus(GetDlgItem(dlg, IDC_BLOCK_LIST));
+        SelectBlock(dlg, (int)r.at);
+        SayInStatus(dlg, FormatW(L"%s removed again.", r.name.c_str()));
+    }
+
+    g_blockUndo[id].PushUndo(std::move(r));
 }
 
 static void CmdPasteBlock(HWND dlg, bool above)
@@ -799,6 +927,13 @@ static INT_PTR CALLBACK SessionDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_BLOCK_ADD:    CmdAddBlock(dlg);    return TRUE;
         case IDM_BLOCK_EDIT:   CmdEditBlock(dlg);   return TRUE;
         case IDM_BLOCK_REMOVE: CmdRemoveBlock(dlg); return TRUE;
+        case IDM_BLOCK_UNDO:
+            // Ctrl+Z belongs to a focused edit control first, the same way
+            // Ctrl+C does: the times field is a read-only edit precisely so
+            // that it can be read from.
+            if (!PassUndoKeyOn(dlg, wp, IDC_BLOCK_LIST)) CmdUndoBlock(dlg);
+            return TRUE;
+        case IDM_BLOCK_REDO:   CmdRedoBlock(dlg); return TRUE;
         case IDM_BLOCK_TOGGLE: CmdToggleBlock(dlg); return TRUE;
         case IDM_BLOCK_UP:     CmdMoveBlock(dlg, -1); return TRUE;
         case IDM_BLOCK_DOWN:   CmdMoveBlock(dlg, +1); return TRUE;
@@ -858,6 +993,8 @@ static INT_PTR CALLBACK SessionDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         Session* s = g_store.ById(SessionIdOf(dlg));
         CheckMenuItem(reinterpret_cast<HMENU>(wp), IDM_SESSION_AUTORUN,
                       MF_BYCOMMAND | ((s && s->autoRun) ? MF_CHECKED : MF_UNCHECKED));
+        NameUndoItems(reinterpret_cast<HMENU>(wp), g_blockUndo[SessionIdOf(dlg)],
+                      IDM_BLOCK_UNDO, IDM_BLOCK_REDO);
         break;
     }
 

@@ -439,6 +439,16 @@ static void CmdRename(HWND dlg)
     SelectSessionById(GetDlgItem(dlg, IDC_SESSION_LIST), id);
 }
 
+// Sessions that have been deleted and could be put back. One stack for the
+// one main window; the block lists keep their own, per session.
+static UndoStack g_sessionUndo;
+
+// A session's name as something to say in a sentence.
+static std::wstring NameOfSession(const Session& s)
+{
+    return s.name.empty() ? std::wstring(L"an unnamed session") : s.name;
+}
+
 static void CmdDelete(HWND dlg)
 {
     HWND list = GetDlgItem(dlg, IDC_SESSION_LIST);
@@ -455,10 +465,82 @@ static void CmdDelete(HWND dlg)
     HWND w = SessionWindowFor(id);
     if (w) DestroyWindow(w);
 
+    // Recorded before it goes, with everything in it, so that Ctrl+Z puts the
+    // session back as it was rather than back as a session with that name.
+    Removal r;
+    r.sessionId = 0;
+    r.session = *s;
+    r.name = NameOfSession(*s);
+    r.verb = L"deleting";
+    g_sessionUndo.Record(std::move(r));
+    ForgetBlockUndo(id);
+
     g_store.sessions.erase(g_store.sessions.begin() + i);
     SaveStore(dlg);
     RefreshMainList();
     SelectIndex(list, i);
+}
+
+// ---------------------------------------------------------------------------
+// Undoing a deleted session
+//
+// A session comes back whole - its blocks, their parameters, its hotkeys -
+// which is the point of this: setting one up again from scratch is the thing
+// nobody wants to do twice. What deliberately does not come back is whether it
+// was running. Putting a document back is one thing; starting audio without
+// being asked is another.
+//
+// This window has no status line, so an undo says what it did by landing the
+// selection on the session it restored, which a screen reader reads out. The
+// menu item says which removal it will undo before the key is pressed, which
+// is the other half of knowing.
+// ---------------------------------------------------------------------------
+
+static void CmdUndoSession(HWND dlg)
+{
+    Removal r;
+    if (!g_sessionUndo.PopUndo(r)) return;
+
+    // The id it had may since have gone to a session made after it went, in
+    // which case it takes a new one: an id belongs to the store, and two
+    // sessions sharing one would be two sessions nothing could tell apart.
+    // Written back into the record, so a redo can still find it.
+    if (g_store.ById(r.session.id)) r.session.id = g_store.NewId();
+
+    // No position is recorded for a session, unlike a block: the list is kept
+    // in name order, so where it lands is decided by what it is called.
+    g_store.sessions.push_back(r.session);
+    g_store.SortSessions();
+    SaveStore(dlg);
+    RefreshMainList();
+    SelectSessionById(GetDlgItem(dlg, IDC_SESSION_LIST), r.session.id);
+
+    g_sessionUndo.PushRedo(std::move(r));
+}
+
+static void CmdRedoSession(HWND dlg)
+{
+    Removal r;
+    if (!g_sessionUndo.PopRedo(r)) return;
+
+    // By id rather than by position, the list being in name order. Already
+    // gone - deleted by hand since the undo - is not an error; there is simply
+    // nothing left to take away.
+    for (size_t i = 0; i < g_store.sessions.size(); ++i)
+    {
+        if (g_store.sessions[i].id != r.session.id) continue;
+
+        StopSession(r.session.id);
+        HWND w2 = SessionWindowFor(r.session.id);
+        if (w2) DestroyWindow(w2);
+        g_store.sessions.erase(g_store.sessions.begin() + i);
+        SaveStore(dlg);
+        RefreshMainList();
+        SelectIndex(GetDlgItem(dlg, IDC_SESSION_LIST), (int)i);
+        break;
+    }
+
+    g_sessionUndo.PushUndo(std::move(r));
 }
 
 static void CmdOpen(HWND dlg)
@@ -704,6 +786,13 @@ INT_PTR CALLBACK MainDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_SESSION_OPENDIR: CmdOpenRecordFolder(dlg); return TRUE;
         case IDM_SESSION_RENAME:  CmdRename(dlg); return TRUE;
         case IDM_SESSION_DELETE:  CmdDelete(dlg); return TRUE;
+        case IDM_SESSION_UNDO:
+            // Ctrl+Z belongs to a focused edit control first, the same way
+            // Ctrl+C does in the session window. Nothing editable is on this
+            // window yet, so today this only ever falls through.
+            if (!PassUndoKeyOn(dlg, wp, IDC_SESSION_LIST)) CmdUndoSession(dlg);
+            return TRUE;
+        case IDM_SESSION_REDO:    CmdRedoSession(dlg); return TRUE;
         case IDM_SESSION_IMPORT:  ImportSession(dlg); return TRUE;
         case IDM_SESSION_EXPORT:
         {
@@ -753,6 +842,8 @@ INT_PTR CALLBACK MainDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         ScheduleEvent* e = SelectedEvent();
         CheckMenuItem(reinterpret_cast<HMENU>(wp), IDM_SCHED_TOGGLE,
                       MF_BYCOMMAND | ((e && e->enabled) ? MF_CHECKED : MF_UNCHECKED));
+        NameUndoItems(reinterpret_cast<HMENU>(wp), g_sessionUndo,
+                      IDM_SESSION_UNDO, IDM_SESSION_REDO);
         break;
     }
 

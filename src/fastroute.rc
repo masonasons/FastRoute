@@ -64,6 +64,11 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "E&xit",                        IDM_APP_EXIT
     END
+    POPUP "&Edit"
+    BEGIN
+        MENUITEM "&Undo\tCtrl+Z",                 IDM_SESSION_UNDO
+        MENUITEM "&Redo\tCtrl+Y",                 IDM_SESSION_REDO
+    END
     POPUP "&Session"
     BEGIN
         MENUITEM "&Open\tEnter",                 IDM_SESSION_OPEN
@@ -117,6 +122,11 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "Hot&key...",                   IDM_BLOCK_HOTKEY
         MENUITEM "Action Hot&keys...",            IDM_BLOCK_ACTIONS
+    END
+    POPUP "&Edit"
+    BEGIN
+        MENUITEM "&Undo\tCtrl+Z",                 IDM_BLOCK_UNDO
+        MENUITEM "&Redo\tCtrl+Y",                 IDM_BLOCK_REDO
     END
     POPUP "&Session"
     BEGIN
@@ -384,6 +394,9 @@ BEGIN
     VK_F2,      IDM_SESSION_RENAME, VIRTKEY
     "E",        IDM_SESSION_EXPORT, VIRTKEY, CONTROL
     "I",        IDM_SESSION_IMPORT, VIRTKEY, CONTROL
+    "Z",        IDM_SESSION_UNDO,   VIRTKEY, CONTROL
+    "Y",        IDM_SESSION_REDO,   VIRTKEY, CONTROL
+    "Z",        IDM_SESSION_REDO,   VIRTKEY, CONTROL, SHIFT
 END
 
 IDR_SESSION_MENU ACCELERATORS
@@ -402,6 +415,9 @@ BEGIN
     VK_OEM_COMMA, IDM_APP_SETTINGS, VIRTKEY, CONTROL
     "O",        IDM_SESSION_OPENDIR, VIRTKEY, CONTROL, SHIFT
     "E",        IDM_SESSION_EXPORT, VIRTKEY, CONTROL
+    "Z",        IDM_BLOCK_UNDO,     VIRTKEY, CONTROL
+    "Y",        IDM_BLOCK_REDO,     VIRTKEY, CONTROL
+    "Z",        IDM_BLOCK_REDO,     VIRTKEY, CONTROL, SHIFT
 END
 
 /////////////////////////////////////////////////////////////////////////////

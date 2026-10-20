@@ -412,3 +412,7 @@
 #define IDM_BLOCK_PASTE_ABOVE   40039
 #define IDM_SESSION_EXPORT      40040
 #define IDM_SESSION_IMPORT      40041
+#define IDM_SESSION_UNDO        40042
+#define IDM_SESSION_REDO        40043
+#define IDM_BLOCK_UNDO          40044
+#define IDM_BLOCK_REDO          40045
