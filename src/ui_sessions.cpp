@@ -696,6 +696,21 @@ INT_PTR CALLBACK MainDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         return TRUE;
     }
 
+    // The updater asking whether it may go ahead, from its own thread. It has
+    // to be answered here: the engine table belongs to this thread, and a
+    // question needs a window to go on.
+    if (msg == WM_APP_MAY_EXIT)
+    {
+        if (wp) return ConfirmExitWhileRunning(dlg, true) ? 1 : 0;
+
+        // No question allowed, so this is an update installing itself quietly.
+        // It holds off while anything is running rather than stopping a
+        // recording nobody was told about - unless the setting that protects
+        // running sessions is switched off, in which case the user has already
+        // said this does not matter to them.
+        return (g_store.settings.confirmExit && AnySessionRunning()) ? 0 : 1;
+    }
+
     switch (msg)
     {
     case WM_INITDIALOG:
@@ -922,7 +937,11 @@ INT_PTR CALLBACK MainDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         // Before anything is taken apart, since the answer may be no. Alt+F4
         // and the notification area's Exit both arrive here too, which is the
         // point: they are the two ways to exit by accident.
-        if (!ConfirmExitWhileRunning(dlg)) return TRUE;
+        //
+        // A non-zero wParam means the caller has already asked and been told
+        // yes - the updater, which has to ask before it starts the script
+        // rather than after. Windows itself always sends nought here.
+        if (!wp && !ConfirmExitWhileRunning(dlg)) return TRUE;
 
         KillTimer(dlg, kSchedulerTimer);
         KillTimer(dlg, kRunningTimer);

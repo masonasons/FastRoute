@@ -39,9 +39,29 @@ using UpdateProgressFn = std::function<bool(unsigned long long, unsigned long lo
 bool DownloadUpdate(const std::wstring& url, UpdateProgressFn progress,
                     std::wstring* err);
 
-// Unpacks what was downloaded over this folder and restarts. This does not
-// return: it asks the application to close so that the exe can be replaced.
-void ApplyUpdate();
+// Unpacks the downloaded update over this copy and restarts it.
+//
+// `mayAsk` is whether a question may be put on screen: true for an update
+// somebody asked for, false for one installing itself quietly. Either way
+// nothing is changed until it is settled that FastRoute can actually exit,
+// because the script that replaces the exe cannot be called back once it has
+// started.
+//
+// False when it held off. The download is kept, so the next attempt has
+// nothing to fetch again.
+bool ApplyUpdate(bool mayAsk);
+
+// The script that does it, as text. One batch file: wait for process `pid`
+// (whose image is called `exeName`) to go, unpack `zip` into `tmp`, copy that
+// over `dir`, tidy up, start `dir`\\`exeName` again and delete itself.
+//
+// Separated from ApplyUpdate because this is the part that cannot be tried
+// out any other way. ApplyUpdate replaces the running program, so there is no
+// watching it work; the script is a string, and a string can be read, and
+// pointed somewhere harmless and actually run.
+std::wstring UpdateScriptFor(unsigned long pid, const std::wstring& exeName,
+                             const std::wstring& zip, const std::wstring& tmp,
+                             const std::wstring& dir);
 
 // The UI thread's way in. Checks on a thread of its own and then, on the UI
 // thread, either offers the update or says there is none - except when silent,

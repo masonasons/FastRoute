@@ -985,11 +985,49 @@ newer than 0.6 rather than older as a plain string comparison would have it.
 
 Applying one is a batch file, because an exe cannot overwrite itself while it
 is running: FastRoute writes the script, asks itself to close, and the script
-waits, unpacks the zip over the folder, starts the new copy and deletes itself.
-Nothing in the zip is a settings file - it holds the exe and the documentation
-and nothing else - so sessions, settings and recordings are left where they
-are. Nothing is installed and nothing in the registry is touched, which is the
-same reason the whole folder can live on a memory stick.
+waits for the process to actually go, unpacks the zip over the folder, starts
+the new copy and deletes itself. Nothing in the zip is a settings file - it
+holds the exe and the documentation and nothing else - so sessions, settings
+and recordings are left where they are. Nothing is installed and nothing in
+the registry is touched, which is the same reason the whole folder can live on
+a memory stick.
+
+**The script waits for the process, not for a length of time.** It used to
+pause for two seconds, and that is not a promise anybody can keep - what takes
+the time is stopping the sessions, and closing a recording means finalising an
+encoder, which on a long file easily outlasts any fixed pause. Getting it wrong
+does not fail cleanly: a running exe cannot be overwritten, so the copy skips
+that one file and replaces everything around it, leaving the new support files
+beside the old program with nothing said about it. It gives up after two
+minutes having changed nothing at all, and the download is kept.
+
+### Updating while sessions are running
+
+Installing an update stops every running session, so it is settled **before**
+anything is written. The script cannot be called back once it has started, so
+asking afterwards was asking too late.
+
+* **An update you asked for** says which sessions are running and offers
+  **Update** or **Later**. Later changes nothing and keeps the download, so it
+  costs nothing but the wait. Anything being recorded is closed properly
+  first, so nothing already recorded is lost - but the sessions do not start
+  themselves again afterwards unless they are set to run at startup, and that
+  is the part worth knowing before saying yes.
+* **An update installing itself quietly** does not ask, because there is
+  nobody there to answer and a dialog in front of somebody who did not ask for
+  one is the thing the whole setting avoids. It holds off instead while
+  anything is running, says so in the error log, and installs at the next
+  check once the machine is idle - or straight away from Help > Check for
+  Updates.
+
+  The switch it reads is **ask before exiting while sessions are running**,
+  which is the one place FastRoute already records whether running sessions
+  are something to be careful with. Turn that off and a quiet update will
+  stop them without asking, which is what turning it off says.
+
+This is also why the confirmation only appears once. The question is asked
+before the script starts, and the close that follows is marked as already
+agreed to, so there is no second dialog on the way out.
 
 A scheduled check that fails says nothing and writes to the error log instead.
 A laptop that was asleep, or a network that is not up yet, is the usual reason,

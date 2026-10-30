@@ -23,6 +23,13 @@ bool SessionRunning(int sessionId)
     return it != g_engines.end() && it->second->Running();
 }
 
+bool AnySessionRunning()
+{
+    for (const auto& kv : g_engines)
+        if (kv.second && kv.second->Running()) return true;
+    return false;
+}
+
 static bool StartSessionInto(int sessionId, std::wstring* err)
 {
     Session* s = g_store.ById(sessionId);

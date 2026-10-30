@@ -16,6 +16,16 @@ extern HWND      g_mainDlg;
 // The notification area icon talks back through this, and the global hotkey
 // arrives as WM_HOTKEY carrying this id.
 #define WM_APP_TRAY (WM_APP + 1)
+
+// Sent, not posted, by the updater just before it does anything irreversible:
+// may FastRoute exit now? The answer needs the engine table, which belongs to
+// the window's own thread, and the question needs a window to put a dialog on
+// - so it is asked of the main window and answered there.
+//
+// wParam is 1 when a question may be put on screen and 0 when it may not,
+// which is the difference between an update somebody asked for and one
+// installing itself quietly in the background. Returns 1 to go ahead.
+#define WM_APP_MAY_EXIT (WM_APP + 2)
 static const int kHotkeyId = 1;
 
 // ---- running engines ------------------------------------------------------
@@ -144,7 +154,16 @@ void ShowSettingsDialog(HWND parent);
 // Asks before exiting while sessions are running, since exiting stops them.
 // True to go ahead. Answers true without asking when nothing is running, or
 // when the settings say not to.
-bool ConfirmExitWhileRunning(HWND owner);
+//
+// `forUpdate` changes the wording, the buttons and the title: an update stops
+// the sessions and then starts FastRoute again, which is a different thing to
+// agree to than exiting, and a dialog that said "Exit FastRoute?" in the
+// middle of installing one would be a dialog nobody could make sense of.
+bool ConfirmExitWhileRunning(HWND owner, bool forUpdate = false);
+
+// Whether any session is running at all. The engine table belongs to the main
+// window's thread, so this is only to be called from it.
+bool AnySessionRunning();
 
 // ---------------------------------------------------------------------------
 // Undo, shared by the two windows that have an Edit menu

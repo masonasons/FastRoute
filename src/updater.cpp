@@ -355,15 +355,91 @@ bool DownloadUpdate(const std::wstring& url, UpdateProgressFn progress,
 // and delete itself. Nothing in the zip is a settings file, so sessions.json
 // and the rest are left where they are.
 // ---------------------------------------------------------------------------
-void ApplyUpdate()
+std::wstring UpdateScriptFor(unsigned long pid, const std::wstring& exeName,
+                             const std::wstring& zip, const std::wstring& tmp,
+                             const std::wstring& dir)
+{
+    // It waits for the process to actually go rather than guessing at how long
+    // it takes. It used to pause for two seconds, and that is not a promise
+    // anybody can keep: what takes the time is stopping the sessions, and
+    // closing a recording means finalising an encoder, which on a long file
+    // easily outlasts any fixed pause.
+    //
+    // Getting it wrong does not fail cleanly either. An exe cannot be
+    // overwritten while it is running, so xcopy skips that one file and
+    // replaces everything around it - a half-updated install, the new support
+    // files beside the old program, and nothing said about it. Then the script
+    // deletes the download and starts FastRoute, which finds the old copy
+    // still running and hands straight back to it.
+    //
+    // The wait is on the process id and the image name together. The id alone
+    // would be matched against every column tasklist prints, and a memory
+    // figure that happens to read like a process id would keep it waiting.
+    //
+    // Two minutes is the limit, after which it gives up having changed
+    // nothing: :giveup skips every destructive line and falls into the one
+    // that deletes the script. The download is left where it is, so the next
+    // attempt has nothing to fetch again.
+    //
+    // The restart is guarded on the file being there. `start` on a file that
+    // is not puts up an error box, and this runs hidden - so it would be an
+    // error nobody can see and nobody can dismiss, with the script waiting on
+    // it for good and leaving itself behind in the folder. Found by running
+    // the thing: the harness pointed it at an exe that did not exist and a
+    // hidden cmd sat there until it was killed.
+    return FormatW(
+        L"@echo off\r\n"
+        L"set /a tries=0\r\n"
+        L":wait\r\n"
+        L"tasklist /nh /fi \"PID eq %lu\" 2>nul | find /i \"%s\" >nul\r\n"
+        L"if errorlevel 1 goto go\r\n"
+        L"set /a tries+=1\r\n"
+        L"if %%tries%% geq 120 goto giveup\r\n"
+        L"timeout /t 1 /nobreak > nul\r\n"
+        L"goto wait\r\n"
+        L":go\r\n"
+        L"powershell -NoProfile -Command \"Expand-Archive -LiteralPath '%s' "
+        L"-DestinationPath '%s' -Force\"\r\n"
+        L"xcopy /s /y /q \"%s\\*\" \"%s\\\"\r\n"
+        L"rmdir /s /q \"%s\"\r\n"
+        L"del \"%s\"\r\n"
+        L"if exist \"%s\\%s\" start \"\" \"%s\\%s\"\r\n"
+        L":giveup\r\n"
+        L"del \"%%~f0\"\r\n",
+        pid, exeName.c_str(),
+        zip.c_str(), tmp.c_str(),
+        tmp.c_str(), dir.c_str(),
+        tmp.c_str(),
+        zip.c_str(),
+        dir.c_str(), exeName.c_str(),
+        dir.c_str(), exeName.c_str());
+}
+
+bool ApplyUpdate(bool mayAsk)
 {
     const std::wstring zip = UpdateZipPath();
     if (GetFileAttributesW(zip.c_str()) == INVALID_FILE_ATTRIBUTES)
     {
         ErrorBox(g_mainDlg, L"The downloaded update has gone missing, so "
                             L"nothing has been changed.");
-        return;
+        return false;
     }
+
+    // Settled before anything is written, because the script below cannot be
+    // called back once it has started. It waits two seconds and then replaces
+    // the exe whether or not this process has gone - so asking afterwards, as
+    // this used to, meant the question and the overwrite racing each other.
+    // Answer no, or take three seconds to read it, and the update went in
+    // around a still-running FastRoute: every file replaced except the one
+    // that was locked, which is the exe, and the download deleted on the way
+    // out. A half-replaced install and nothing to say so.
+    //
+    // Asked of the main window rather than worked out here. The engine table
+    // belongs to that thread and a dialog needs its window, and this runs on a
+    // worker thread - the check and the download both block.
+    if (g_mainDlg &&
+        SendMessageW(g_mainDlg, WM_APP_MAY_EXIT, mayAsk ? 1 : 0, 0) == 0)
+        return false;
 
     const std::wstring dir = ExeDir();
     const std::wstring bat = dir + L"\\update.bat";
@@ -375,26 +451,11 @@ void ApplyUpdate()
     {
         ErrorBox(g_mainDlg, FormatW(L"%s could not be written, so the update "
                                     L"has not been applied.", bat.c_str()));
-        return;
+        return false;
     }
 
-    // Written as UTF-8 without a marker: cmd reads a batch file as bytes, and
-    // a byte order mark at the top of one is echoed as rubbish.
-    const std::wstring script = FormatW(
-        L"@echo off\r\n"
-        L"timeout /t 2 /nobreak > nul\r\n"
-        L"powershell -NoProfile -Command \"Expand-Archive -LiteralPath '%s' "
-        L"-DestinationPath '%s' -Force\"\r\n"
-        L"xcopy /s /y /q \"%s\\*\" \"%s\\\"\r\n"
-        L"rmdir /s /q \"%s\"\r\n"
-        L"del \"%s\"\r\n"
-        L"start \"\" \"%s\\%s\"\r\n"
-        L"del \"%%~f0\"\r\n",
-        zip.c_str(), tmp.c_str(),
-        tmp.c_str(), dir.c_str(),
-        tmp.c_str(),
-        zip.c_str(),
-        dir.c_str(), ExeName().c_str());
+    const std::wstring script = UpdateScriptFor(
+        (unsigned long)GetCurrentProcessId(), ExeName(), zip, tmp, dir);
 
     const int bytes = WideCharToMultiByte(CP_UTF8, 0, script.c_str(), -1,
                                           nullptr, 0, nullptr, nullptr);
@@ -413,11 +474,14 @@ void ApplyUpdate()
     {
         ErrorBox(g_mainDlg, L"The update script could not be started, so "
                             L"nothing has been changed.");
-        return;
+        return false;
     }
 
-    // And now go, so that the exe can be replaced.
-    PostMessageW(g_mainDlg, WM_CLOSE, 0, 0);
+    // And now go, so that the exe can be replaced. The non-zero wParam says
+    // the exit has already been agreed to, so the window does not ask about
+    // the running sessions a second time.
+    PostMessageW(g_mainDlg, WM_CLOSE, 1, 0);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +525,20 @@ bool DownloadAndApply(HWND parent, const UpdateInfo& info, bool silent)
                              err.empty() ? L"no reason given." : err.c_str()));
         return false;
     }
-    ApplyUpdate();
+    // Quietly means quietly: an update nobody asked for does not get to put a
+    // dialog in front of somebody, so when it cannot go ahead it says so in
+    // the log and waits for the next check. The download is kept.
+    if (!ApplyUpdate(!silent))
+    {
+        if (silent)
+            LogError(FormatW(
+                L"An update to %s was downloaded but not installed, because a "
+                L"session is running and installing it would stop it. It will "
+                L"be installed at the next check once nothing is running, or "
+                L"now from Help > Check for Updates.",
+                info.version.c_str()));
+        return false;
+    }
     return true;
 }
 

@@ -4251,14 +4251,21 @@ bool PassUndoKeyOn(HWND dlg, WPARAM wp, int listId)
 // back on by somebody who regrets it.
 // ---------------------------------------------------------------------------
 
+// What the dialog is being asked about, handed in as the dialog's parameter.
+struct ConfirmExitArgs
+{
+    const std::vector<std::wstring>* names = nullptr;
+    bool forUpdate = false;
+};
+
 static INT_PTR CALLBACK ConfirmExitDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
     {
     case WM_INITDIALOG:
     {
-        const std::vector<std::wstring>* names =
-            reinterpret_cast<const std::vector<std::wstring>*>(lp);
+        const ConfirmExitArgs* args = reinterpret_cast<const ConfirmExitArgs*>(lp);
+        const std::vector<std::wstring>* names = args->names;
 
         std::wstring text;
         if (names->size() == 1)
@@ -4269,8 +4276,28 @@ static INT_PTR CALLBACK ConfirmExitDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM
             for (const std::wstring& n : *names) text += L"    " + n + L"\r\n";
             text += L"\r\n";
         }
-        text += L"Exiting FastRoute stops them. Any recording in progress is "
-                L"closed properly first, so no recording is lost.";
+
+        if (args->forUpdate)
+        {
+            // An update is not an exit: FastRoute comes back by itself. What
+            // somebody is being asked to accept is the gap, which for a
+            // recording means one file ending and another beginning.
+            text += L"Installing the update stops them, replaces FastRoute and "
+                    L"starts it again. Any recording in progress is closed "
+                    L"properly first, so nothing already recorded is lost - but "
+                    L"the sessions do not start themselves again unless they "
+                    L"are set to run at startup.\r\n\r\n"
+                    L"The download is kept either way, so Later costs "
+                    L"nothing but the wait.";
+            SetWindowTextW(dlg, L"Install the update");
+            SetDlgItemTextW(dlg, IDOK, L"&Update");
+            SetDlgItemTextW(dlg, IDCANCEL, L"&Later");
+        }
+        else
+        {
+            text += L"Exiting FastRoute stops them. Any recording in progress "
+                    L"is closed properly first, so no recording is lost.";
+        }
 
         SetDlgItemTextW(dlg, IDC_EXIT_TEXT, text.c_str());
         return TRUE;        // the dialog manager sets the focus
@@ -4301,7 +4328,7 @@ static INT_PTR CALLBACK ConfirmExitDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM
     return FALSE;
 }
 
-bool ConfirmExitWhileRunning(HWND owner)
+bool ConfirmExitWhileRunning(HWND owner, bool forUpdate)
 {
     if (!g_store.settings.confirmExit) return true;
 
@@ -4312,9 +4339,13 @@ bool ConfirmExitWhileRunning(HWND owner)
                                              : s.name);
     if (running.empty()) return true;
 
+    ConfirmExitArgs args;
+    args.names = &running;
+    args.forUpdate = forUpdate;
+
     return DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_CONFIRM_EXIT), owner,
                            ConfirmExitDlgProc,
-                           reinterpret_cast<LPARAM>(&running)) == IDOK;
+                           reinterpret_cast<LPARAM>(&args)) == IDOK;
 }
 
 void OpenRecordFolder(HWND owner, int sessionId, int preferBlock)
