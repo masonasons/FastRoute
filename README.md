@@ -343,6 +343,38 @@ embedded browser process. If a block captures nothing, the thing to try is the
 list itself: whatever is making the sound is in it by definition, under its own
 name, while something is playing.
 
+### When the helpers share the application's name
+
+Steam's helper has a name of its own. A Chromium application's helpers do not:
+Discord is six processes, all called `Discord.exe`, and Chrome, Edge, Teams and
+Slack are the same shape. One of them is the browser process and the rest - a
+renderer, a GPU process, a network service, a crash handler, an audio service -
+are its children.
+
+Since a block captures its target's whole process tree, the browser process is
+the one to point at, and naming `Discord.exe` picks it. The other five are
+inside its tree and come along, including the audio service, and including a
+new audio service if Chromium restarts the one that was running.
+
+Picking any of the others would capture that one process and nothing else,
+because a child's own tree is just the child. This is worth saying because
+neither obvious way of choosing gets it right, as Discord demonstrates on this
+machine:
+
+* The browser process had the **highest** process id of the six. Taking the
+  first one found, or the lowest, picks a renderer - which plays what it is
+  sent and nothing else.
+* Two of the six held an audio session, and the one Chromium actually plays
+  through is the audio service, which it tears down and restarts under its own
+  rules and which does not exist at all while Discord is quiet. Taking
+  whichever process holds a session picks a process that may be gone a minute
+  later, and when Discord is silent picks nothing at all.
+
+So the rule is the top of the tree: of the processes with that name, the ones
+with no ancestor of the same name are the real instances. Two separately
+launched copies of a program are two such instances, and then the one with
+audio anywhere in its tree is the one taken.
+
 ## Capturing whatever is in front
 
 An **Application** block can be pointed at a process by name, as it always

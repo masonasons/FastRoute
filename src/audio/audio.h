@@ -102,6 +102,28 @@ std::vector<unsigned long> SelectSystemCaptureTargets(
     const std::vector<std::wstring>& exclude,
     unsigned long self);
 
+// Which single process an application block naming `exeName` should be pointed
+// at, given the process table and what is playing. 0 when it is not running.
+//
+// Process loopback takes the target and its whole tree, so for a program that
+// is several processes - every Chromium application is, which covers Discord,
+// Chrome, Edge, Teams, Slack and most of the rest - the one to point at is the
+// topmost. Point at a child and you capture that child alone, its tree being
+// just itself, and most of those children never play a sound.
+//
+// So: among the processes of that name, the ones with no ancestor of the same
+// name are the real instances and the rest are helpers inside them. One such
+// root is the answer. Several means separate copies of the program really are
+// running, and then the one with audio anywhere in its tree is the one meant -
+// asked of the tree rather than of the process, because the audio is usually
+// coming out of a helper.
+//
+// Separated from the enumeration so that the choice can be checked without the
+// program in question having to be running.
+unsigned long SelectAppCaptureTarget(const std::vector<ProcessEntry>& tree,
+                                     const std::vector<AudioProcess>& audio,
+                                     const std::wstring& exeName);
+
 // ---------------------------------------------------------------------------
 // The foreground application
 //

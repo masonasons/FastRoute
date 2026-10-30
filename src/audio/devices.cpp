@@ -139,35 +139,113 @@ static std::wstring ExeNameForPid(DWORD pid)
     return name;
 }
 
-unsigned long FindProcessIdByName(const std::wstring& exeName)
+// The name of one pid, out of a snapshot already taken.
+static std::wstring NameOfPid(const std::vector<ProcessEntry>& all, unsigned long pid)
+{
+    for (const ProcessEntry& e : all) if (e.pid == pid) return e.exeName;
+    return std::wstring();
+}
+
+// Is any process above `pid` called `exeName`? That is what makes `pid` a
+// helper inside somebody else's application rather than the application.
+static bool HasAncestorNamed(const std::vector<ProcessEntry>& all,
+                             unsigned long pid, const std::wstring& exeName)
+{
+    unsigned long cur = pid;
+    // The same hop limit SelfAndAbove uses: a snapshot taken while processes
+    // are starting and stopping can describe a loop that never existed, and
+    // walking it forever would hang the session start.
+    for (int hop = 0; hop < 64 && cur; ++hop)
+    {
+        unsigned long parent = 0;
+        for (const ProcessEntry& e : all) if (e.pid == cur) { parent = e.parent; break; }
+        if (!parent) return false;
+        if (IEquals(NameOfPid(all, parent), exeName)) return true;
+        cur = parent;
+    }
+    return false;
+}
+
+// Is `pid` the root of a tree, or somewhere inside it?
+static bool InTreeOf(const std::vector<ProcessEntry>& all, unsigned long root,
+                     unsigned long pid)
+{
+    if (root == pid) return true;
+    unsigned long cur = pid;
+    for (int hop = 0; hop < 64 && cur; ++hop)
+    {
+        unsigned long parent = 0;
+        for (const ProcessEntry& e : all) if (e.pid == cur) { parent = e.parent; break; }
+        if (!parent) return false;
+        if (parent == root) return true;
+        cur = parent;
+    }
+    return false;
+}
+
+// Which process a capture of a named program should be pointed at.
+//
+// Process loopback takes the target and its whole tree, so for a program that
+// is several processes - which every Chromium application is, and that covers
+// Discord, Chrome, Edge, Teams, Slack and most of the rest - the one to point
+// at is the topmost one. Point at a child instead and you capture that child
+// alone, its own tree being just itself, and most of those children never play
+// a sound.
+//
+// Discord was the report, and it is worth writing down because it breaks both
+// of the obvious answers at once. Six processes all called Discord.exe: the
+// browser process on top, with a renderer, a GPU process, a network service, a
+// crash handler and an audio service under it.
+//
+//   * "the first one found" picked a renderer, because the browser process had
+//     the HIGHEST process id of the six - a snapshot is in no useful order, and
+//     Chromium starts its children after itself.
+//   * "whichever owns an audio session" picked the audio service, which is one
+//     of two Discord processes holding a session, is torn down and restarted
+//     under Chromium's own rules, and does not exist at all while Discord is
+//     quiet - which is how a chat program usually is when you start a session.
+//
+// So: the root. Among the processes of this name, the ones with no ancestor of
+// the same name are the real instances and the rest are helpers inside them.
+// One root is the answer. Several means separate copies of the program really
+// are running, and then the one with audio anywhere in its tree is the one
+// meant - asked of the tree, not of the process, because the audio usually is
+// coming out of a helper.
+unsigned long SelectAppCaptureTarget(const std::vector<ProcessEntry>& tree,
+                                     const std::vector<AudioProcess>& audio,
+                                     const std::wstring& exeName)
 {
     if (exeName.empty()) return 0;
 
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
+    std::vector<unsigned long> mine;
+    for (const ProcessEntry& e : tree)
+        if (IEquals(e.exeName, exeName)) mine.push_back(e.pid);
+    if (mine.empty()) return 0;
 
-    DWORD best = 0;
-    PROCESSENTRY32W pe{};
-    pe.dwSize = sizeof(pe);
-    if (Process32FirstW(snap, &pe))
-    {
-        do
-        {
-            if (IEquals(pe.szExeFile, exeName))
-            {
-                // Prefer the process that actually owns an audio session; failing
-                // that, take the first match.
-                if (!best) best = pe.th32ProcessID;
-            }
-        } while (Process32NextW(snap, &pe));
-    }
-    CloseHandle(snap);
+    std::vector<unsigned long> roots;
+    for (unsigned long pid : mine)
+        if (!HasAncestorNamed(tree, pid, exeName)) roots.push_back(pid);
 
-    // If several instances exist, prefer one currently playing audio.
-    for (const AudioProcess& ap : EnumAudioProcesses())
-        if (IEquals(ap.exeName, exeName)) return ap.pid;
+    // Every one of them being inside another is not a shape Windows produces,
+    // but a snapshot that disagrees with itself could describe it. Falling back
+    // to the whole set keeps an answer rather than none at all.
+    if (roots.empty()) roots = mine;
 
-    return best;
+    if (roots.size() == 1) return roots[0];
+
+    for (const AudioProcess& ap : audio)
+        for (unsigned long root : roots)
+            if (InTreeOf(tree, root, ap.pid)) return root;
+
+    // Nothing playing anywhere, so there is nothing to choose on. The lowest
+    // id is a stable answer rather than whichever the snapshot listed first.
+    return *std::min_element(roots.begin(), roots.end());
+}
+
+unsigned long FindProcessIdByName(const std::wstring& exeName)
+{
+    if (exeName.empty()) return 0;
+    return SelectAppCaptureTarget(EnumProcessTree(), EnumAudioProcesses(), exeName);
 }
 
 std::vector<ProcessEntry> EnumProcessTree()
